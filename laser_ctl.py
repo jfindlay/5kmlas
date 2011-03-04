@@ -51,8 +51,9 @@ class Shutter:
 
 class Radiometer(Serial):
   def __init__(self):
+    print 'initializing radiometer'
     self.buffer_size = 2**16
-    super(Serial,self).__init__('/dev/ttyUSB0',baudrate=9600,timeout=1)
+    super(Serial,self).__init__('/dev/ttyUSB0',baudrate=9600,timeout=5)
     sleep(0.5) ; self.write('TG 1\r') # internal trigger
     sleep(0.5) ; self.write('SS 0\r') # no single shot
     sleep(0.5) ; self.write('RA 2\r') # range 2
@@ -65,7 +66,7 @@ class Radiometer(Serial):
   def read_data(self):
     energies = []
     for i in re.split(r'\s+',self.read(self.buffer_size)):
-      try: # only collect the numbers from the radiometer output
+      try: # only return the numbers from the radiometer output
         energies.append(float(i))
       except:
         pass
@@ -78,7 +79,7 @@ def main():
   ## init data
   #data = Data()
 
-  ## init PTH,radiometer
+  ## init PTH,inverter
   #pth = PTH()
   #inverter = Inverter()
 
@@ -91,7 +92,6 @@ def main():
   #pth.radiometer_on()
 
   # init radiometer
-  print 'initializing radiometer'
   radiometer = Radiometer()
 
   ## open shutter
@@ -101,34 +101,35 @@ def main():
   #pth.laser_on()
 
   # run for 3 min
+  print 'collecting data'
   now = start_time = datetime.utcnow()
-  three_minutes = timedelta(seconds=5)
-  print 'now collecting data'
+  three_minutes = timedelta(minutes=3)
   while (now <= start_time + three_minutes):
     # poll environment and electronic data about once a second
     #sleep(1)
     #data.append(pth.poll_data())
     #data.append(inverter.poll_data())
     now = datetime.utcnow()
+  print 'done'
 
   ## power off laser
-  #inverter.power_off()
-  #data.append(radiometer.read_data())
-
-  # gather radiometer data.  The radiometer will wait to return until after it stops detecting data for ~ 1s, so we have to power off the laser first.
-  print radiometer.read_data()
-  #data.append(radiometer.read_data())
+  #pth.laser_off()
 
   ## close shutter
   #pth.close_shutter()
 
-  ## power off radiometer
-  #pth.radiometer_off()
-
-  ## power off heater
-  #pth.heater_off()
+  # gather radiometer data.  The radiometer will wait to return until after it stops collecting data for ~ 1s, so we have to power off the laser first.
+  print radiometer.read_data()
+  #data.append(radiometer.read_data())
 
   ## write data
   #data.write()
+
+  ## power off radiometer
+  #pth.radiometer_off()
+  #inverter.power_off()
+
+  ## power off heater
+  #pth.heater_off()
 
 if __name__ == "__main__" : main()
