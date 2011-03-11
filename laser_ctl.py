@@ -23,6 +23,8 @@ class Data:
       self.inverter.append(kwargs['inverter_datum'])
   def write(self):
     print 'writing data'
+    # load objects from DST.py and write data structure into DST file
+    # the format of the DST file will be a heterogeneous stream with one part per UTC day
 
 class PTH(Serial):
   '''
@@ -53,22 +55,22 @@ class PTH(Serial):
     self.read(self.buffer_size) # clear output buffer
 
   def heater_on(self):
-    pass
+    print 'turning on heater'
 
   def heater_off(self):
-    pass
+    print 'turning off heater'
 
   def laser_on(self):
-    pass
+    print 'turning on laser'
 
   def laser_off(self):
-    pass
+    print 'turning off laser'
 
   def open_shutter(self):
-    pass
+    print 'opening shutter'
 
   def close_shutter(self):
-    pass
+    print 'closing shutter'
 
   def poll_data(self):
     self.read(self.buffer_size) # clear output buffer
@@ -90,13 +92,13 @@ class PTH(Serial):
 
 class Inverter:
   def __init__(self):
-    pass
+    print 'initializing inverter'
 
   def power_on(self):
-    pass
+    print 'powering on inverter'
 
   def power_off(self):
-    pass
+    print 'powering off inverter'
 
   def poll_data(self):
     pass
@@ -126,6 +128,7 @@ class Radiometer(Serial):
   def __init__(self):
     print 'initializing radiometer'
     self.buffer_size = 2**16
+    self.stop_time = self.start_time = datetime.utcnow()
     super(Serial,self).__init__('/dev/ttyTS0',baudrate=9600,timeout=5)
     sleep(0.5) ; self.write('TG 1\r') # internal trigger
     sleep(0.5) ; self.write('SS 0\r') # no single shot
@@ -136,9 +139,14 @@ class Radiometer(Serial):
     #self.flushOutput() - doesn't work when run from SBC
     self.read(self.buffer_size) # clear output buffer
 
+  def start(self):
+    self.start_time = datetime.utcnow()
+
+  def stop(self):
+    self.stop_time = datetime.utcnow()
+
   def read_data(self):
     print 'reading radiometer data'
-    self.read(self.buffer_size) # clear output buffer
     energies = []
     for i in re.split(r'\s+',self.read(self.buffer_size)):
       try: # only return the numbers from the radiometer output
@@ -163,12 +171,14 @@ def main():
   pth.laser_on()
 
   print 'collecting data'
+  radiometer.start()
   now = start_time = datetime.utcnow()
   five_minutes = timedelta(seconds=10)
   while (now <= start_time + five_minutes):
     sleep(5)
     data.append(pth_datum=pth.poll_data(),inverter_datum=inverter.poll_data())
     now = datetime.utcnow()
+  radiometer.stop()
   print 'done'
 
   pth.laser_off()
