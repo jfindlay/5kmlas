@@ -11,14 +11,16 @@ from serial import Serial
 class Data:
   def __init__(self):
     self.radiometer = []
-    self.pth = []
+    self.ipth = []
     self.inverter = []
 
   def append(self,*args,**kwargs):
     if 'radiometer_datum' in kwargs:
       self.radiometer.append(kwargs['radiometer_datum'])
-    if 'pth_datum' in kwargs:
-      self.pth.append(kwargs['pth_datum'])
+    if 'ipth_datum' in kwargs:
+      self.ipth.append(kwargs['ipth_datum'])
+    if 'epth_datum' in kwargs:
+      self.epth.append(kwargs['epth_datum'])
     if 'inverter_datum' in kwargs:
       self.inverter.append(kwargs['inverter_datum'])
   def write(self):
@@ -47,41 +49,60 @@ class PTH(Serial):
      TLOW [<temp>]           - set heater set point (output E)
      VER                     - read device firmware version'''
 
-  def __init__(self):
-    print 'initializing PTH board'
+  def __init__(self,*args,**kwargs):
     self.buffer_size = 2**16
-    super(Serial,self).__init__('/dev/ttyAM1',baudrate=9600,timeout=0.5)
-    self.write('ECHO 0\r\n')
-    self.read(self.buffer_size) # clear output buffer
+    if 'location' in kwargs:
+      self.location = kwargs['location']
+      print 'initializing %s PTH board' % self.location
+      if self.location == 'internal':
+        super(Serial,self).__init__('/dev/ttyAM1',baudrate=9600,timeout=0.5)
+      if self.location == 'external':
+        super(Serial,self).__init__('/dev/ttyAM5',baudrate=9600,timeout=0.5)
+        self.write('RMON 1\r\n')
+      self.write('ECHO 0\r\n')
+      self.read(self.buffer_size) # clear output buffer
+
+  def epth_on(self):
+    if self.location == 'internal':
+      print 'turning on external PTH'
+
+  def epth_off(self):
+    if self.location == 'internal':
+      print 'turning off external PTH'
 
   def heater_on(self):
-    print 'turning on heater'
+    if self.location == 'internal':
+      print 'turning on heater'
+      # wait for it to stabilize for 30s?
 
   def heater_off(self):
-    print 'turning off heater'
+    if self.location == 'internal':
+      print 'turning off heater'
 
   def laser_on(self):
-    print 'turning on laser'
+    if self.location == 'internal':
+      print 'turning on laser'
 
   def laser_off(self):
-    print 'turning off laser'
+    if self.location == 'internal':
+      print 'turning off laser'
 
   def open_shutter(self):
-    print 'opening shutter'
+    if self.location == 'internal':
+      print 'opening shutter'
 
   def close_shutter(self):
-    print 'closing shutter'
+    if self.location == 'internal':
+      print 'closing shutter'
 
   def poll_data(self):
     self.read(self.buffer_size) # clear output buffer
-    self.write('PRESS\r\n')
-    press = self.read(self.buffer_size)
-    self.write('TEMP\r\n')
-    temp = self.read(self.buffer_size)
-    self.write('HUMID\r\n')
-    humid = self.read(self.buffer_size)
-    self.write('SUPPLY\r\n')
-    supply = self.read(self.buffer_size)
+    self.write('PRESS\r\n')  ; press = self.read(self.buffer_size)
+    self.write('TEMP\r\n')   ; temp = self.read(self.buffer_size)
+    self.write('HUMID\r\n')  ; humid = self.read(self.buffer_size)
+    self.write('SUPPLY\r\n') ; supply = self.read(self.buffer_size)
+    if self.location == 'external':
+      self.write('RAIN\r\n') ; rain = self.read(self.buffer_size)
     data_dict = {}
     for i in press,temp,humid,supply:
       # typical datum = ['PRESS','867.3']
@@ -129,7 +150,8 @@ class Radiometer(Serial):
     print 'initializing radiometer'
     self.buffer_size = 2**16
     self.stop_time = self.start_time = datetime.utcnow()
-    super(Serial,self).__init__('/dev/ttyTS0',baudrate=9600,timeout=5)
+    #super(Serial,self).__init__('/dev/ttyTS0',baudrate=9600,timeout=5)
+    super(Serial,self).__init__('/dev/ttyUSB1',baudrate=9600,timeout=5)
     sleep(0.5) ; self.write('TG 1\r') # internal trigger
     sleep(0.5) ; self.write('SS 0\r') # no single shot
     sleep(0.5) ; self.write('RA 2\r') # range 2
@@ -150,6 +172,8 @@ class Radiometer(Serial):
     energies = []
     for i in re.split(r'\s+',self.read(self.buffer_size)):
       try: # only return the numbers from the radiometer output
+        #energy = float(i)
+        #if energy 0
         energies.append(float(i))
       except:
         pass
@@ -161,32 +185,40 @@ class Laser:
 
 def main():
   data = Data()
-  pth = PTH()
+  ipth = PTH(location='internal')
   inverter = Inverter()
 
-  pth.heater_on() # wait for it to stabilize for 30s?
+  ipth.epth_on()
+  epth = PTH(location='external')
+  epth.poll_data()
+
+  ipth.heater_on()
   inverter.power_on()
   radiometer = Radiometer()
-  pth.open_shutter()
-  pth.laser_on()
+  ipth.open_shutter()
 
   print 'collecting data'
-  radiometer.start()
+  ipth.laser_on()
   now = start_time = datetime.utcnow()
   five_minutes = timedelta(seconds=10)
   while (now <= start_time + five_minutes):
+    data.append(ipth_datum=ipth.poll_data(),
+        epth_datum=epth.poll_data(),
+        inverter_datum=inverter.poll_data())
     sleep(5)
-    data.append(pth_datum=pth.poll_data(),inverter_datum=inverter.poll_data())
     now = datetime.utcnow()
   radiometer.stop()
+  ipth.laser_off()
   print 'done'
 
-  pth.laser_off()
-  pth.close_shutter()
+  ipth.close_shutter()
   data.append(radiometer_datum=radiometer.read_data())
-  data.write()
   inverter.power_off()
-  pth.heater_off()
-  print data.pth,data.radiometer
+  ipth.heater_off()
+  ipth.epth_off()
+  data.write()
+  print data.ipth,data.radiometer
 
-if __name__ == "__main__" : main()
+#if __name__ == "__main__" : main()
+
+rad = Radiometer()
