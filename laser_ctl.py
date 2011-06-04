@@ -3,6 +3,38 @@
 # Wed Feb 16 16:05:00 MST 2011
 # findlay@cosmic.utah.edu
 
+# TODO:
+# - daemonize: move script to /usr/bin/laser_ctl and create
+#   /etc/init.d/laser_ctl.  Allow for foreground connections to be made by
+#   middle drum operators.  PTH init will occur on SBC bootup, retain a
+#   persistent connection with the daemon, and will log environment and
+#   battery data continuously.  The rest of the sequence will be controlled by
+#   a simple `laser_ctl run` command assisted by argparse.  Run data and non-
+#   run PTH data will be batched onto the data USB storage and formatted into a
+#   DST bank by an anacron job at middle drum, where it will be pooled into the
+#   regular data collection and processing streams as already implemented in
+#   middle drum operations.
+# - change failure responses as appropriate: it is not necessary to 'emergency
+#   shutdown' after every failure
+# - shutdown if rain detected
+# - PTH and RPC don't really use the check_*_state scheme as implemented.  Is
+#   there a command that can be used to test the success of their
+#   initialization?
+# - capture and handle pyserial errors on the PTH, RPC, and radiometer
+# - debug flag to print out internal messages
+
+# list of modules:
+# control
+#   data
+#   PTH
+#     rain
+#     heater
+#     inverter
+#   RPC
+#     radiometer
+#     shutter
+#     laser
+
 import re
 from datetime import datetime,timedelta
 from time import sleep
@@ -25,7 +57,7 @@ class Data:
     if 'stop' in kwargs:
       self.times['stop'] = kwargs['stop']
   def write(self):
-    print 'writing data'
+    pass
     # load objects from DST.py and write data structure into DST file
     # the format of the DST file will be a heterogeneous stream with one part per UTC day
 
@@ -54,50 +86,94 @@ class PTH(Serial):
   '''
 
   def __init__(self,*args,**kwargs):
-    print 'initializing PTH board'
-    self.buffer_size = 65536                 # = 2**2**2**2 : termios read buffer size
-    self.name = 'pressure, temperature, and humidity module' # PTH module name
-    self.message = ''                        # error message
+    self.buffer_size = 65536                  # = 2**2**2**2 : termios read buffer size
+    self.name = 'PTH board'                   # PTH module name
+    self.message = ''                         # state message
     super(Serial,self).__init__('/dev/tts/0',baudrate=9600,timeout=0.5)
-    self.power_state = power_state.on        # module power state: undefined,on,off
-    self.write('RMON 1\r\n')                 # enable rain monitoring
-    self.check_switch_state(self.read(self.buffer_size)) # check that rmon got enabled
-    self.write('ECHO 0\r\n')                 # disable PTH-side serial echo
-    self.read(self.buffer_size)              # clear output buffer
-    self.conf_state = conf_state.initialized # module conf state: undefined,initialized,finalized
+    self.write('ECHO 0\r\n')                  # disable PTH-side serial echo
+    self.read(self.buffer_size)               # clear output buffer
+    self.write('HELP\r\n')                    # check PTH initialized
+    self.output = self.read(self.buffer_size)
+    if re.search(r'\?\|HELP\s+-\s+help',self.output,re.M):
+      self.conf_state = conf_state.initialized  # module conf state: undefined,initialized,finalized
+    else: # PTH did not print help message
+      self.conf_state = conf_state.error
 
-  def on(self,module=None): # closes a PTH switch and waits for the associated module to stabilize
-    print module.on_message,
-    if module.power_on_sleep > 0 : print ' ... ',
-    self.write('OUT %s 1\r\n' % module.PTH_switch) # close PTH switch for module
-    module.message = self.read(self.buffer_size)   # capture module state
-    sleep(module.power_on_sleep)                   # wait for module to stabilize
-    if module.power_on_sleep > 0 : print 'done'
-    else : print
+  def on_rain(self,module=None):
+    self.write('RMON 1\r\n')                        # enable rain monitoring
+    module.PTH_output = self.read(self.buffer_size) # capture PTH output
+    module.message = '\nPTH output:\n%s' % module.PTH_output
+    self.check_switch_state(module=module)          # check that rmon got enabled
+    if module.power_state == power_state.on:        # if module powered on
+      sleep(module.power_on_sleep)                  # wait for module to stabilize
 
-  def off(self,module=None): # opens a PTH switch
-    print '%s' % module.off_message
-    self.write('OUT %s 0\r\n' % module.PTH_switch) # open PTH switch for module
-    self.read(self.buffer_size)                    # clear PTH output buffer
+  def off_rain(self,module=None):
+    self.write('RMON 0\r\n')                        # disable rain monitoring
+    module.PTH_output = self.read(self.buffer_size) # capture PTH output
+    module.message = '\nPTH output:\n%s' % module.PTH_output
+    self.check_switch_state(module=module)          # check that rmon got disabled
+    if module.power_state == power_state.off:       # if module powered off
+      sleep(module.power_off_sleep)                 # wait for module to stabilize
+
+  def on(self,module=None): # close a PTH switch
+    self.write('OUT %s 1\r\n' % module.PTH_switch)  # close PTH switch for module
+    module.PTH_output = self.read(self.buffer_size) # capture PTH output
+    module.message = '%s is on PTH switch %s\n\nPTH output:\n%s' % (module.name,module.PTH_switch,module.PTH_output)
+    self.check_switch_state(module=module)          # check module power on
+    if module.power_state == power_state.on:        # if module powered on
+      sleep(module.power_on_sleep)                  # wait for module to stabilize
+
+  def off(self,module=None): # open a PTH switch
+    self.write('OUT %s 0\r\n' % module.PTH_switch)  # open PTH switch for module
+    module.PTH_output = self.read(self.buffer_size) # capture PTH output
+    module.message = '%s is on PTH switch %s\n\nPTH output:\n%s' % (module.name,module.PTH_switch,module.PTH_output)
+    self.check_switch_state(module=module)          # check module power off
+    if module.power_state == power_state.off:       # if module powered off
+      sleep(module.power_off_sleep)                 # wait for module to stabilize
 
   def poll_data(self):
     self.read(self.buffer_size) # clear output buffer
     self.write('PRESS\r\n')  ; press = self.read(self.buffer_size)
     self.write('TEMP\r\n')   ; temp = self.read(self.buffer_size)
     self.write('HUMID\r\n')  ; humid = self.read(self.buffer_size)
+    self.write('RAIN\r\n')   ; rain = self.read(self.buffer_size)
     self.write('SUPPLY\r\n') ; supply = self.read(self.buffer_size)
     data_dict = {}
-    for i in press,temp,humid,supply:
+    for measure in press,temp,humid,supply:
       # typical datum = ['PRESS','867.3']
-      datum = re.split(r'\s+',i)[:-1]
+      datum = re.split(r'\s+',measure)[:-1]
       data_dict[datum[0]] = float(datum[1])
+    rain_datum = re.split(r'\s+',measure)[:-1]
+    data_dict[rain_datum[0]] = rain_datum[1]
     data_dict['timestamp'] = datetime.utcnow()
     return data_dict
 
-  def check_switch_state(self,module):
-    self.message = ''
-    self.conf_state
-    return re.search(r'^(.*on 1.*)$',output,state).group(1)
+  def check_switch_state(self,module=None):
+    if re.search(r'rain',module.name): # checking rain module switch
+      if re.search(r'^.*RMON 1.*$',module.PTH_output,re.M):
+        module.power_state = power_state.on
+      elif re.search(r'^.*RMON 0.*$',module.PTH_output,re.M):
+        module.power_state = power_state.off
+      else:
+        module.power_state = power_state.undefined
+    else: # checking other module switch: heater or inverter
+      if re.search(r'^.*OUT %s 1.*$' % module.PTH_switch,module.PTH_output,re.M):
+        module.power_state = power_state.on
+      elif re.search(r'^.*OUT %s 0.*$' % module.PTH_switch,module.PTH_output,re.M):
+        module.power_state = power_state.off
+      else:
+        module.power_state = power_state.undefined
+
+class Rain:
+  '''rain module'''
+
+  def __init__(self):
+    self.name = 'rain monitor'               # heater module name
+    self.power_state = power_state.undefined # module power state: undefined,on,off
+    self.power_on_sleep = 5                  # time to stabilize after power on
+    self.power_off_sleep = 0                 # time to stabilize after power off
+    self.PTH_output = ''                     # PTH output
+    self.message = ''                        # state message
 
 class Heater:
   '''heater module'''
@@ -105,58 +181,76 @@ class Heater:
   def __init__(self):
     self.name = 'window heater'              # heater module name
     self.power_state = power_state.undefined # module power state: undefined,on,off
-    self.PTH_switch = 'B'                    # PTH board switch that controls heater
+    self.PTH_switch = 'B'                    # PTH board switch name
     self.power_on_sleep = 30                 # time to stabilize after power on
-    self.on_message = 'warming up heater'    # on message
-    self.off_message = 'powering off heater' # off message
-    self.message = ''                        # error message
+    self.power_off_sleep = 0                 # time to stabilize after power off
+    self.PTH_output = ''                     # PTH output
+    self.message = ''                        # state message
 
 class Inverter:
   '''inverter module'''
 
   def __init__(self):
-    self.name = 'power inverter'               # inverter module name
-    self.power_state = power_state.undefined   # module power state: undefined,on,off
-    self.PTH_switch = 'A'                      # PTH board switch name
-    self.power_on_sleep = 0                    # time to stabilize after power on
-    self.on_message = 'powering on inverter'   # on message
-    self.off_message = 'powering off inverter' # off message
-    self.message = ''                          # error message
+    self.name = 'power inverter'             # inverter module name
+    self.power_state = power_state.undefined # module power state: undefined,on,off
+    self.PTH_switch = 'A'                    # PTH board switch name
+    self.power_on_sleep = 10                 # time to stabilize after power on
+    self.power_off_sleep = 0                 # time to stabilize after power off
+    self.PTH_output = ''                     # PTH output
+    self.message = ''                        # state message
 
-class RPC:
+class RPC(Serial):
   '''
   RPC module
 
-  put typical RPC output here
+  RPC-2 Series
+  (C) 1997 by BayTech
+  F2.07
+  
+  Circuit Breaker: On 
+  
+  1)...Outlet 1  : Off 
+  2)...Outlet 2  : Off 
+  3)...Outlet 3  : Off 
+  4)...Outlet 4  : Off 
+  5)...Outlet 5  : Off 
+  6)...Outlet 6  : Off 
   '''
 
   def __init__(self):
-    self.buffer_size = 16 # = 2**2**2 : termios read buffer size
-    print 'initializing RPC'
-    super(Serial,self).__init__('/dev/tts/1',baudrate=9600,timeout=0.5)
+    self.buffer_size = 65536                 # = 2**2**2**2 : termios read buffer size
+    self.name = 'RPC module'                 # RPC module name
+    self.message = ''                        # state message
+    super(Serial,self).__init__('/dev/tts/1',baudrate=9600,timeout=2)
+    output = self.read(self.buffer_size) # init message
+    if re.search(r'RPC-2 Series\s+\(C\) 1997 by BayTech\s+F2\.07',output):
+      self.conf_state = conf_state.initialized # module conf state: undefined,initialized,finalized
 
-  def on(self,module=None): # powers on a RPC outlet and waits for the associated module to stabilize
-    print module.on_message,
-    if module.power_on_sleep > 0 : print ' ... ',
-    self.write('on %d\r\n' % module.RPC_switch)          # power on module RPC port
-    self.write('Y\r\n')                                  # confirm power on
-    self.check_state(self.read(self.buffer_size),module) # check powered on
-    sleep(module.power_on_sleep)                         # wait for module to stabilize
-    if module.power_on_sleep > 0 : print 'done'
-    else : print
+  def on(self,module=None): # power on a RPC outlet
+    self.write('ON %d\r\n' % module.RPC_outlet)     # power on RPC outlet for module
+    sleep(1) ; self.write('Y\r\n')                  # wait 1 s and confirm power on
+    module.RPC_output = self.read(self.buffer_size) # capture RPC output
+    module.message = '%s is on RPC outlet %d\n\nRPC output:\n%s' % (module.name,module.RPC_outlet,module.RPC_output)
+    self.check_power_state(module=module)                 # check powered on
+    if module.power_state == power_state.on:        # if module powered on
+      sleep(module.power_on_sleep)                  # wait for module to stabilize
 
-  def off(self,module=None): # powers off a RPC outlet and waits for the associated module to stabilize
-    print module.off_message,
-    if module.power_off_sleep > 0 : print ' ... ',
-    self.write('off %d\r\n' % module.RPC_switch)         # power on module RPC port
-    self.write('Y\r\n')                                  # confirm power off
-    self.check_state(self.read(self.buffer_size),module) # check powered off
-    sleep(module.power_off_sleep)                        # wait for module to stabilize
-    if module.power_on_sleep > 0 : print 'done'
-    else : print
+  def off(self,module=None): # power off a RPC outlet
+    self.write('OFF %d\r\n' % module.RPC_outlet)    # power off RPC outlet for module
+    sleep(1) ; self.write('Y\r\n')                  # wait 1 s and confirm power off
+    module.RPC_output = self.read(self.buffer_size) # capture RPC output
+    module.message = '%s is on RPC outlet %d\n\nRPC output:\n%s' % (module.name,module.RPC_outlet,module.RPC_output)
+    self.check_power_state(module=module)                 # check powered off
+    if module.power_state == power_state.off:       # if module powered off
+      sleep(module.power_off_sleep)                 # wait for module to stabilize
 
-  def check_power_state(self,module):
-    return re.search(r'^(.*on 1.*)$',output,state).group(1)
+  def check_power_state(self,module=None):
+    if re.search(r'^.*Outlet\s+%d\s+:\s+On.*$' % module.RPC_outlet,module.RPC_output,re.M):
+      module.power_state = power_state.on
+    elif re.search(r'^.*Outlet\s+%d\s+:\s+Off.*$' % module.RPC_outlet,module.RPC_output,re.M):
+      module.power_state = power_state.off
+    else:
+      module.power_state = power_state.undefined
 
 class Radiometer(Serial):
   '''
@@ -177,36 +271,39 @@ class Radiometer(Serial):
   AD       ASCII Dump Mode
   '''
 
-  # due to the software paradigm I'm using, I cannot combine the creation of
-  # the radiometer object with the initalizaion of the radiometer module
   def __init__(self): # software init
-    self.name = 'radiometer'                     # radiometer module name
-    self.power_state = power_state.undefined     # power state: undefined,on,off
-    self.conf_state = conf_state.undefined       # configuration state: undefined,initialized,finalized
-    self.RPC_switch = 1                          # RPC switch name
-    self.power_on_sleep = 0                      # time to wait after power on
-    self.power_off_sleep = 0                     # time to wait after power off
-    self.on_message = 'powering on radiometer'   # on message
-    self.off_message = 'powering off radiometer' # off message
-    self.message = ''                                  # error message
+    self.name = 'radiometer'                 # radiometer module name
+    self.power_state = power_state.undefined # power state: undefined,on,off
+    self.conf_state = conf_state.undefined   # configuration state: undefined,initialized,finalized
+    self.RPC_outlet = 1                      # RPC outlet number
+    self.power_on_sleep = 0                  # time to wait after power on
+    self.power_off_sleep = 0                 # time to wait after power off
+    self.RPC_output = ''                     # RPC output
+    self.message = ''                        # state message
 
   def init(self): # hardware init
-    print 'initializing radiometer'
-    self.buffer_size = 2**16
-    self.stop_time = self.start_time = datetime.utcnow()
+    self.buffer_size = 65536          # = 2**2**2**2 : termios read buffer size
     super(Serial,self).__init__('/dev/tts/2',baudrate=9600,timeout=5)
     # the radiometer needs a timeout buffer between consecutive commands
     sleep(0.5) ; self.write('TG 1\r') # internal trigger
     sleep(0.5) ; self.write('SS 0\r') # no single shot
-    sleep(0.5) ; self.write('RA 2\r') # range 2
+    sleep(0.5) ; self.write('RA 2\r') # range 2: TODO: energy limits on this range?
     sleep(0.5) ; self.write('BS 0\r') # disable internal battery save
-    sleep(0.5) ; self.write('AD\r')   # ASCII dump
-    self.flushInput()
-    #self.flushOutput() - doesn't work when run from SBC
-    self.read(self.buffer_size) # clear output buffer
+    #self.flushInput()
+    #self.flushOutput()               # doesn't work when run from SBC
+    self.read(self.buffer_size)       # clear output buffer
+    self.write('ST\r')                # check return status
+    self.output = self.read(self.buffer_size)
+    if self.output == 0:
+      self.conf_state = conf_state.initialized
+      self.write('AD\r')              # ASCII dump
+    else: # TODO: try to figure out how to get radiometer into 0 (no) error state
+      #self.conf_state = conf_state.error
+      #self.message = 'radiometer returned error status, ST, %d' % int(self.output)
+      self.conf_state = conf_state.initialized
+      self.write('AD\r')              # ASCII dump
 
   def read_data(self):
-    print 'reading radiometer data'
     energies = []
     for i in re.split(r'\s+',self.read(self.buffer_size)):
       try: # only return the numbers from the radiometer output
@@ -225,12 +322,23 @@ class Shutter:
   def __init__(self):
     self.name = 'shutter'                    # radiometer module name
     self.power_state = power_state.undefined # power state: undefined,on,off
-    self.RPC_switch = 1                      # RPC switch name
+    self.RPC_outlet = 3                      # RPC outlet number
     self.power_on_sleep = 10                 # time to wait after power on
     self.power_off_sleep = 10                # time to wait after power off
-    self.on_message = 'opening shutter'      # on message
-    self.off_message = 'closing shutter'     # off message
-    self.message = ''                              # error message
+    self.RPC_output = ''                     # RPC output
+    self.message = ''                        # state message
+
+class Laser:
+  '''laser module'''
+
+  def __init__(self):
+    self.name = 'laser'                      # radiometer module name
+    self.power_state = power_state.undefined # power state: undefined,on,off
+    self.RPC_outlet = 2                      # RPC outlet number
+    self.power_on_sleep = 2                  # time to wait after power on
+    self.power_off_sleep = 0                 # time to wait after power off
+    self.RPC_output = ''                     # RPC output
+    self.message = ''                        # state message
 
 class Enum:
   # this idiom is from http://norvig.com/python-iaq.html.  It might be better
@@ -283,163 +391,210 @@ class Enum:
     if type(names) == type('') : return names.split()
     else : return names
 
+phase = Enum('init run final')
 # hardware states
-conf_state = Enum('undefined initialized finalized')
 power_state = Enum('undefined on off')
-phase_state = Enum('init final')
+conf_state = Enum('undefined initialized finalized error')
 
 class Control:
   '''
   software control module for 5kmlas apparatus
 
-  This control module wraps each function call to the other modules in order to
+  This control module wraps each function call of the other modules in order to
   simplify and unify error traps.  Each call sets one or more associated states
   in the module.  The control module will take action upon each setting of
   state: either proceed normally or try to return the hardware and software to
   a well-defined and safe state.
 
-  This scheme assumes at least two things:
+  This scheme assumes at least three things:
   - The python code and the operating system it runs on are either so much more
     reliable in comparison with the hardware that they aren't worth checking or
     they will provide their own error handling when necessary.
   - The firmware on the hardware is so much more reliable than the hardware
     itself that all problems will originate with a hardware failure or
     misconfiguration and that the firmware will report it.
+  - The hardware modules will fail only at the time of a state change
+  If any of the serial devices (PTH,RPC,radiometer) fail on the negotiation of
+  the serial connection, pyserial will handle and report those errors and the
+  control module will intercept those errors and shutdown as appropriate.
 
   The control process has three phases: init, run, and final.  Depending on the
-  phase, the control module may fail in a different manner.
+  phase and module, the control module may fail in a different manner.
   '''
+
   def __init__(self):
-
-  def init(self):
-    self.data = Data()     # init data structure
-    self.init_PTH()        # init PTH board
-    self.init_heater()     # init window heater
-    self.init_inverter()   # init inverter
-    self.init_RPC()        # init RPC
-    self.init_radiometer() # init radiometer
-    self.init_shutter()    # init shutter
-
-  def run(self):
-    print 'collecting data ... ',
-    five_minutes = timedelta(seconds=10)
-    now = self.start_time = datetime.utcnow()     # record laser on time
-    self.init_laser()                             # power on laser
-    while (now <= start_time + five_minutes):     # run for 5 minutes
-      self.data.append(pth_datum=pth.poll_data()) # collect PTH data about every 5 seconds
-      sleep(5)
-      now = datetime.utcnow()
-    self.final_laser()                            # power off laser
-    self.stop_time = datetime.utcnow()            # record laser off time
-    print 'done'
-
-  def final(self):
-    self.final_shutter()    # close shutter
-    self.data.append(radiometer_datum=radiometer.read_data(),
-        start=self.start_time,
-        stop=self.stop_time)
-    self.data.write()       # format and save data
-    self.final_radiometer() # power off radiometer
-    self.final_inverter()   # power off inverter
-    self.final_heater()     # power off window heater
+    pass
 
   def init_PTH(self):
+    print 'initializing PTH board ...'
     self.pth = PTH()                       # init PTH board
     self.check_init_state(module=self.pth) # check PTH init state
 
-  def init_heater(self):
+  def on_rain(self):
+    print 'powering on rain monitor ...'
+    self.rain = Rain()
+    self.pth.on_rain(module=self.rain)    # power on rain monitor module
+    self.check_on_state(module=self.rain) # check rain monitor power state
+
+  def off_rain(self):
+    print 'powering off rain monitor ...'
+    self.pth.off_rain(module=self.rain)    # power off rain monitor module
+    self.check_off_state(module=self.rain) # check rain monitor init state
+
+  def on_heater(self):
+    print 'powering on heater ...'
     self.heater = Heater()                  # create heater object
     self.pth.on(module=self.heater)         # power on heater module
     self.check_on_state(module=self.heater) # check heater power state
 
-  def final_heater(self):
+  def off_heater(self):
+    print 'powering off heater ...'
     self.pth.off(module=self.heater)         # power off heater module
     self.check_off_state(module=self.heater) # check heater power state
 
-  def init_inverter(self):
+  def on_inverter(self):
+    print 'powering on inverter ...'
     self.inverter = Inverter()                # create inverter object
     self.pth.on(module=self.inverter)         # power on inverter module
     self.check_on_state(module=self.inverter) # check inverter power state
 
-  def final_inverter(self):
+  def off_inverter(self):
+    print 'powering off inverter ...'
     self.pth.off(module=self.inverter)         # power off inverter module
     self.check_off_state(module=self.inverter) # check inverter power state
 
   def init_RPC(self):
+    print 'initializing RPC module ...'
     self.rpc = RPC()                       # init RPC module
     self.check_init_state(module=self.rpc) # check RPC init state
 
-  def init_radiometer(self):
+  def on_radiometer(self):
+    print 'powering on radiometer ...'
     self.radiometer = Radiometer()                # create radiometer object
     self.rpc.on(module=self.radiometer)           # power on radiometer module
     self.check_on_state(module=self.radiometer)   # check radiometer power state
+
+  def init_radiometer(self):
+    print 'initializing radiometer ...'
     self.radiometer.init()                        # init radiometer module
     self.check_init_state(module=self.radiometer) # check radiometer conf state
 
-  def final_radiometer(self):
+  def off_radiometer(self):
+    print 'powering off radiometer ...'
     self.rpc.off(module=self.radiometer)           # power off radiometer module
     self.check_off_state(module=self.radiometer)   # check radiometer power state
 
-  def init_shutter(self):
+  def on_shutter(self):
+    print 'opening shutter ...'
     self.shutter = Shutter()                 # create shutter object
     self.rpc.on(module=self.shutter)         # power on shutter module
     self.check_on_state(module=self.shutter) # check shutter power state
 
-  def final_shutter(self):
+  def off_shutter(self):
+    print 'closing shutter ...'
     self.rpc.off(module=self.shutter)         # power off shutter module
     self.check_off_state(module=self.shutter) # check shutter power state
 
-  def init_laser(self):
+  def on_laser(self):
+    print '  powering on laser ...'
     self.laser = Laser()                   # create laser object
     self.rpc.on(module=self.laser)         # power on laser module
     self.check_on_state(module=self.laser) # check laser power state
 
-  def final_laser(self):
+  def off_laser(self):
+    print '  powering off laser ...'
     self.rpc.off(module=self.laser)         # power off laser
     self.check_off_state(module=self.laser) # check laser power state
 
   def check_init_state(self,module=None):
     if module.conf_state == conf_state.initialized:
-      pass
+      print 'done'
     elif module.conf_state == conf_state.undefined or module.conf_state == conf_state.finalized:
-      print '\n%s failed to initialize: %s' % (module.name,module.failure_message)
+      print 'failed\n%s\n' % module.message
+      self.emergency_shutdown(phase=phase.init)
+    elif module.conf_state == conf_state.error:
+      print 'error\n%s\n' % module.message
       self.emergency_shutdown(phase=phase.init)
 
   def check_final_state(self,module=None):
     if module.conf_state == conf_state.finalized:
-      pass
+      print 'done'
     elif module.conf_state == conf_state.undefined or module.conf_state == conf_state.initialized:
-      print '\n%s failed to %s: %s' % (kwargs['module'],kwargs['finalize action'],kwargs['message'])
+      print 'failed\n%s\n' % module.message
+      self.emergency_shutdown(phase=phase.final)
+    elif module.conf_state == conf_state.error:
+      print 'error\n%s\n' % module.message
       self.emergency_shutdown(phase=phase.final)
 
   def check_on_state(self,module=None):
     if module.power_state == power_state.on:
-      pass
+      print 'done'
     elif module.power_state == power_state.undefined or module.power_state == power_state.off:
-      print '\n%s failed to power on: %s' % (kwargs['module'],kwargs['message'])
+      print 'failed\n%s\n' % module.message
       self.emergency_shutdown(phase=phase.init)
 
   def check_off_state(self,module=None):
     if module.power_state == power_state.off:
-      pass
+      print 'done'
     elif module.power_state == power_state.undefined or module.power_state == power_state.on:
-      print '\n%s failed to power off: %s' % (kwargs['module'],kwargs['message'])
+      print 'failed\n%s\n' % module.message
       self.emergency_shutdown(phase=phase.final)
 
-  def emergency_shutdown(self,phase=None):
+  def emergency_shutdown(self,phase_state=None):
     print 'shutting down 5kmlas'
-    if phase == phase_state.init:
+    if phase_state == phase.init:
       print 'shutting down from init phase'
       # check what modules are already inited and shut them down in reverse order
-    if phase == phase_state.final:
+    if phase_state == phase.final:
       print 'shutting down from final phase'
       # try to save the data and get the system shutdown safely
       # perhaps set a flag on the SBC to not run again if there is a problem
 
 def main():
-  control = Control()
-  control.init()
-  control.run()
-  control.final()
+  '''
+  Interface with the control module
+  '''
+
+  control = Control() # control module
+
+  # init phase
+  control.data = Data()     # init data structure
+  control.init_PTH()        # init PTH board
+  control.on_rain()         # power on rain monitor
+  control.on_heater()       # power on window heater
+  control.on_inverter()     # power on inverter
+  control.init_RPC()        # init RPC
+  control.on_radiometer()   # power on radiometer
+  control.init_radiometer() # init radiometer
+  control.on_shutter()      # power on shutter
+
+  # run phase
+  print 'collecting data ...'
+  five_minutes = timedelta(seconds=10)
+  now = start_time = datetime.utcnow()     # record laser on time
+  control.on_laser()                       # power on laser
+  while (now < start_time + five_minutes): # run for 5 minutes
+    control.data.append(pth_datum=control.pth.poll_data())
+    sleep(5)                               # collect PTH data about every 5 seconds
+    now = datetime.utcnow()
+  control.off_laser()                      # power off laser
+  stop_time = datetime.utcnow()            # record laser off time
+  print 'done'
+
+  # final phase
+  control.off_shutter()    # close shutter
+  control.data.append(radiometer_datum=control.radiometer.read_data(),
+      start=start_time,
+      stop=stop_time)
+  print 'writing data ...'
+  control.data.write()     # format and save data
+  print 'done'
+  control.off_radiometer() # power off radiometer
+  control.off_inverter()   # power off inverter
+  control.off_heater()     # power off window heater
+  control.off_rain()       # power off rain monitor
+  print control.data.radiometer
+  print control.data.pth
+  print control.data.times
 
 if __name__ == '__main__' : main()
