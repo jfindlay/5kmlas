@@ -17,7 +17,7 @@
 # - if operate process fails, daemon process ensures modules shut down
 #   gracefully
 # - daemon process polls PTH periodically.  Polling interval is shorter while
-#   operate or calibration process is running
+#   operation or calibration process is running
 # - need some kind of subprocess IPC setup to accomplish these goals
 # - handle SerialException at all serial calls
 # - resolve print vs printf style issue
@@ -95,7 +95,6 @@ class Enum:
 
 verbosity = Enum('quiet normal verbose') # message verbosity
 phase = Enum('init run final')           # phase
-
 # hardware states
 power_state = Enum('undefined on off')
 conf_state = Enum('undefined initialized finalized error')
@@ -529,7 +528,11 @@ class Control(PowerModule):
     if opts.color:                       # colorful output
       self.color = opts.color
 
-    # setup color
+    self.setup_color()
+    self.setup_modules()
+    # TODO: connect to daemon process.  If it's not there, launch it?
+
+  def setup_color(self):
     # modified from https://svn.blender.org/svnroot/bf-blender/trunk/blender/tools/bcolors.py
     if self.color == True:
       self.CYAN   = '\033[96m'
@@ -550,8 +553,7 @@ class Control(PowerModule):
       self.GRAY   = ''
       self.ENDC   = ''
 
-    # TODO: connect to daemon process.  If it's not there, launch it?
-
+  def setup_modules(self):
     self.phase = phase.init # initial control phase
     self.data = Data()      # data structure
     # create submodule stubs
@@ -563,7 +565,6 @@ class Control(PowerModule):
     self.radiometer = None
     self.shutter = None
     self.laser = None
-
     # create list for modules that won't turn off
     self.modules_no_off = []
 
@@ -843,7 +844,7 @@ class Daemon:
   def run(self):
     self.control.phase = phase.run
     if self.verbosity > verbosity.quiet:
-      self.control.printf('collecting data ...\n')
+      self.control.printf('collecting data\n',color=self.control.GRAY)
     while (True):
       one_hour = timedelta(hours=1)
       now = start_time = datetime.utcnow()
@@ -855,7 +856,7 @@ class Daemon:
         sleep(5*60) # sleep for 5 minutes
         now = datetime.utcnow()
     if self.verbosity > verbosity.quiet:
-      self.control.printf('done\n',color=self.control.GREEN) # this process should never end under normal circumstances
+      self.control.printf('done collecting\n',color=self.control.GRAY) # this process should never end under normal circumstances
 
   def final(self):
     self.control.off_heater() # power off window heater
@@ -874,8 +875,8 @@ class Operate:
     self.control.init_PTH()        # init PTH board
     self.control.on_rain()         # power on rain monitor
     self.control.poll_rain()       # check rain state
-#    self.control.on_heater()       # power on window heater
-#    self.control.on_inverter()     # power on inverter
+    self.control.on_heater()       # power on window heater
+    self.control.on_inverter()     # power on inverter
     self.control.init_RPC()        # init RPC
     self.control.on_radiometer()   # power on radiometer
     self.control.init_radiometer() # init radiometer
@@ -884,7 +885,7 @@ class Operate:
   def run(self):
     self.control.phase = phase.run
     if self.control.verbosity > verbosity.quiet:
-      self.control.printf('collecting data ...\n')
+      self.control.printf('collecting data\n',color=self.control.GRAY)
     five_minutes = timedelta(seconds=10)
     now = self.start_time = datetime.utcnow()     # record laser on time
     self.control.on_laser()                       # power on laser
@@ -892,13 +893,13 @@ class Operate:
       PTH_datum = self.control.poll_PTH_data()    # collect PTH data about every 5 seconds
       self.control.data.append(PTH_datum=PTH_datum)
       if self.control.verbosity == verbosity.verbose:
-      	print PTH_datum # print PTH datum when verbose
+        print PTH_datum # print PTH datum when verbose
       sleep(5)
       now = datetime.utcnow()
     self.control.off_laser()                      # power off laser
     self.stop_time = datetime.utcnow()            # record laser off time
     if self.control.verbosity > verbosity.quiet:
-      self.control.printf('done\n',color=self.control.GREEN)
+      self.control.printf('done collecting\n',color=self.control.GRAY)
 
   def final(self):
     self.control.phase = phase.final
@@ -908,8 +909,8 @@ class Operate:
         start=self.start_time,stop=self.stop_time)
     self.control.write_data()                       # write data
     self.control.off_radiometer()                   # power off radiometer
-#    self.control.off_inverter()                     # power off inverter
-#    self.control.off_heater()                       # power off window heater
+    self.control.off_inverter()                     # power off inverter
+    self.control.off_heater()                       # power off window heater
     self.control.off_rain()                         # power off rain monitor
     if self.control.verbosity == verbosity.verbose: # print all data when verbose
       print self.control.data.radiometer
@@ -929,15 +930,32 @@ def parse_opts():
       '"daemon"    - run background helper process')
   opt_parser.add_option('-c','--color',action='store_const',const=True,
       default=True,help='print messages in color [default]')
-  verbose = OptionGroup(opt_parser,'Verbosity Options')
+  verbose = OptionGroup(opt_parser,'Verbosity Options','More quiet options take precedent over more verbose options.')
   verbose.add_option('-q','--quiet',action='store_const',const=True,
       default=False,help='print nothing except errors')
   verbose.add_option('-n','--normal',action='store_const',const=True,
-      default=True,help='print normal operation messages [default]')
+      default=False,help='print normal operation messages [default]')
   verbose.add_option('-v','--verbose',action='store_const',const=True,
       default=False,help='print data and serial commands and responses')
   opt_parser.add_option_group(verbose)
-  return opt_parser.parse_args()
+  opts,args = opt_parser.parse_args()
+
+  # handle tri-state verbosity option
+  if opts.verbose and opts.normal and opts.quiet:
+    opts.normal = False
+    opts.verbose = False
+  elif opts.verbose and opts.normal:
+    opts.quiet = False
+    opts.verbose = False
+  elif opts.verbose and opts.quiet:
+    opts.normal = False
+    opts.verbose = False
+  elif opts.normal and opts.quiet:
+    opts.normal = False
+    opts.verbose = False
+  if not opts.verbose and not opts.normal and not opts.quiet:
+    opts.normal = True
+  return opts,args
 
 def main():
   opts,args = parse_opts()
