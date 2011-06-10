@@ -1,3 +1,5 @@
 #!/bin/bash
 
-rsync -av root@192.168.0.2:/tmp/laser_ctl .
+rsync -av root@192.168.0.2:/usr/bin/5kmlas_ctl usr/bin/5kmlas_ctl
+rsync -av root@192.168.0.2:/etc/init.d/5kmlas_ctl etc/init.d/5kmlas_ctl
+rsync -av root@192.168.0.2:/etc/5kmlas_ctl/options etc/5kmlas_ctl/options
