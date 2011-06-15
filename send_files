@@ -1,5 +1,5 @@
 #!/bin/bash
 
-rsync -av --inplace usr/bin/5kmlas_ctl root@192.168.0.2:/usr/bin/5kmlas_ctl
+rsync -av --inplace usr/bin/5kmlas_ctl root@192.168.0.2:/tmp/5kmlas_ctl
 rsync -av --inplace etc/init.d/5kmlas_ctl root@192.168.0.2:/etc/init.d/5kmlas_ctl
 rsync -av --inplace etc/5kmlas_ctl/options root@192.168.0.2:/etc/5kmlas_ctl/options

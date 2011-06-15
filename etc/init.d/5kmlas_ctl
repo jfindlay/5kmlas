@@ -1,0 +1,55 @@
+#!/bin/sh
+# /etc/init.d/5kmlas_ctl: this script initializes the 5kmlas_ctl daemon process
+# Thu Jun  9 22:41:04 BRT 2011
+# findlay@cosmic.utah.edu
+
+set -e
+
+test -x /usr/bin/5kmlas_ctl || exit 0
+
+if test -f /etc/default/5kmlas_ctl; then
+    . /etc/default/5kmlas_ctl
+fi
+
+check_config() {
+    if [ ! -e /etc/5kmlas_ctl/options ]; then
+      echo "Cannot load configuration file: /etc/5kmlas_ctl/options." && exit 1
+    fi
+}
+
+export PATH="${PATH:+$PATH:}/usr/sbin:/sbin"
+
+case "$1" in
+  start)
+	check_config
+	echo -n "Starting 5 km laser control service: 5kmlas_ctl"
+	start-stop-daemon --start --quiet --pidfile /var/run/5kmlas_ctl.pid --exec /usr/bin/5kmlas_ctl -- $FKMLAS_CTL_OPTS
+        echo "."
+	;;
+  stop)
+	echo -n "Stopping 5 km laser control service: 5kmlas_ctl"
+	start-stop-daemon --stop --quiet --oknodo --pidfile /var/run/5kmlas_ctl.pid
+        echo "."
+	;;
+
+  reload|force-reload)
+	check_config
+	echo -n "Reloading 5 km laser control service: 5kmlas_ctl"
+	start-stop-daemon --stop --signal 1 --quiet --oknodo --pidfile /var/run/5kmlas_ctl.pid --exec /usr/bin/5kmlas_ctl
+	echo "."
+	;;
+
+  restart)
+	check_config
+	echo -n "Restarting 5 km laser control service: 5kmlas_ctl"
+	start-stop-daemon --stop --quiet --oknodo --retry 30 --pidfile /var/run/5kmlas_ctl.pid
+	start-stop-daemon --start --quiet --pidfile /var/run/5kmlas_ctl.pid --exec /usr/bin/5kmlas_ctl -- $FKMLAS_CTL_OPTS
+	echo "."
+	;;
+
+  *)
+	echo "Usage: /etc/init.d/5kmlas_ctl {start|stop|reload|force-reload|restart}"
+	exit 1
+esac
+
+exit 0

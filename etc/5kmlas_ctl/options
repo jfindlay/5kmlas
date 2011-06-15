@@ -1,0 +1,9 @@
+# /etc/5kmlas_ctl/options
+# Thu Jun  9 22:47:55 BRT 2011
+# jfindlay@cosmic.utah.edu
+
+# run in daemon mode
+--mode=daemon
+
+# no output except errors
+--quiet

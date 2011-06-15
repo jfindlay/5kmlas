@@ -6,14 +6,14 @@
 # TODO:
 # - daemonize: move script to /usr/bin/5kmlas_ctl and create
 #   /etc/init.d/5kmlas_ctl.  Allow for foreground connections to be made by
-#   middle drum operators.  PTH init will occur on SBC bootup, retain a
+#   Middle Drum operators.  PTH init will occur on SBC bootup, retain a
 #   persistent connection with the daemon, and will log environment and
 #   battery data continuously.  The rest of the sequence will be controlled by
-#   a simple `5kmlas_ctl run` command assisted by argparse.  Run data and non-
+#   a simple `5kmlas_ctl run` command assisted by optparse.  Run data and non-
 #   run PTH data will be batched onto the data USB storage and formatted into a
-#   DST bank by an anacron job at middle drum, where it will be pooled into the
-#   regular data collection and processing streams as already implemented in
-#   middle drum operations.
+#   DST bank by a local cron job.  It will then be transferred to Middle Drum,
+#   where it will be pooled into the  regular data collection and processing
+#   streams as already implemented in Middle Drum operations.
 # - if operator process fails, daemon process ensures modules shut down
 #   gracefully
 # - daemon process polls PTH periodically.  Polling interval is shorter while
@@ -34,8 +34,8 @@
 #     - laser
 
 import sys,re
-from datetime import datetime,timedelta
 from time import sleep
+from datetime import datetime,timedelta
 from optparse import OptionParser,OptionGroup
 from serial import Serial,SerialException,SerialTimeoutException
 
@@ -98,6 +98,9 @@ conf_state = Enum('undefined initialized finalized error')
 rain_state = Enum('dry wet open')
 # serial states
 communication_state = Enum('success error timeout')
+# FIFO IPC
+direction = Enum('to_daemon from_daemon')
+side = Enum('daemon operator calibrator')
 
 class Data:
   def __init__(self):
@@ -120,12 +123,17 @@ class Data:
     # TODO:
     # load objects from DST.py and write data structure into DST file
     # the format of the DST file will be a heterogeneous stream with one part per UTC day
+    # once data has been written to storage, clear all data from memory
 
 # module abstract base classes #################################################
 
 class SerialModule(Serial):
   '''
   abstract base class for serial modules
+
+  This class provides error handling for initializing, reading, and writing
+  serial devices.  If an exception is raised by pyserial, a serial module flag
+  is set and then handled by the control module.
   '''
 
   def __init__(self,buffer_size,*args,**kwargs):
@@ -137,6 +145,15 @@ class SerialModule(Serial):
       self.conf_state = conf_state.error
       self.message = 'failed to initialize %s serial connection: %s' % (self.name,serial_exception)
       return
+
+  def read(self):
+    try:
+      self.communication_state = communication_state.success
+      return super(SerialModule,self).read(self.buffer_size)
+    except SerialException,serial_exception:
+      self.communication_state = communication_state.error
+      self.message = 'failed to read from serial device %s: %s' % (self.name,serial_exception)
+      return '' # classes derived from SerialModule always expect a return value of str type
 
   def write(self,data):
     try:
@@ -151,18 +168,9 @@ class SerialModule(Serial):
       self.message = 'failed to write to serial device %s: %s' % (self.name,timeout_exception)
       return
 
-  def read(self):
-    try:
-      self.communication_state = communication_state.success
-      return super(SerialModule,self).read(self.buffer_size)
-    except SerialException,serial_exception:
-      self.communication_state = communication_state.error
-      self.message = 'failed to read from serial device %s: %s' % (self.name,serial_exception)
-      return '' # classes derived from SerialModule always expect a return value of str type
-
 class TestSerial(SerialModule):
   def __init__(self):
-    self.name = 'test serial module base class'
+    self.name = 'test serial module'
     super(TestSerial,self).__init__(65536,'/dev/tts/0',baudrate=9600,timeout=0.5)
 
 class PowerModule(object):
@@ -580,62 +588,80 @@ class Control(PowerModule):
     sys.stdout.write(data)
     sys.stdout.flush()
 
+  def inform(self,data,color=None):
+    '''
+    write error information to sys.stdout even in quiet mode
+    '''
+    self.printf(self,data,color=color)
+
+  def report(self,data,color=None):
+    '''
+    write normal-level information to sys.stdout
+    '''
+    if self.verbosity > verbosity.quiet:
+      self.printf(self,data,color=color)
+
+  def detail(self,data,color):
+    '''
+    write verbose-level information to sys.stdout
+    '''
+    if self.verbosity == verbosity.verbose:
+    self.printf(self,data,color=color)
+
+  # data command
+  def write_data(self):
+    self.report('writing data ... ')
+    self.data.write() # format and save data, then clear data buffer
+    self.report('done\n',color=self.GREEN)
+
   # PTH commands
   def init_PTH(self):
-    if self.verbosity > verbosity.quiet:
-      self.printf('initializing PTH board ... ')
+    self.report('initializing PTH board ... ')
     self.PTH = PTH()                        # init PTH board
     self.check_communication_state(module=self.PTH) # check write state
     self.check_init_state(module=self.PTH)  # check PTH init state
 
   def on_rain(self):
-    if self.verbosity > verbosity.quiet:
-      self.printf('powering on rain monitor ... ')
+    self.report('powering on rain monitor ... ')
     self.rain = Rain()
     self.PTH.on(module=self.rain)           # power on rain monitor module
     self.check_communication_state(module=self.PTH) # check write state
     self.check_on_state(module=self.rain)   # check rain monitor power state
 
   def off_rain(self):
-    if self.verbosity > verbosity.quiet:
-      self.printf('powering off rain monitor ... ')
+    self.report('powering off rain monitor ... ')
     self.PTH.off(module=self.rain)          # power off rain monitor module
     self.check_communication_state(module=self.PTH) # check write state
     self.check_off_state(module=self.rain)  # check rain monitor init state
 
   def on_heater(self):
-    if self.verbosity > verbosity.quiet:
-      self.printf('powering on heater ... ')
+    self.report('powering on heater ... ')
     self.heater = Heater()                  # create object for heater module
     self.PTH.on(module=self.heater)         # power on heater module
     self.check_communication_state(module=self.PTH) # check write state
     self.check_on_state(module=self.heater) # check heater power state
 
   def off_heater(self):
-    if self.verbosity > verbosity.quiet:
-      self.printf('powering off heater ... ')
+    self.report('powering off heater ... ')
     self.PTH.off(module=self.heater)         # power off heater module
     self.check_communication_state(module=self.PTH)  # check write state
     self.check_off_state(module=self.heater) # check heater power state
 
   def on_inverter(self):
-    if self.verbosity > verbosity.quiet:
-      self.printf('powering on inverter ... ')
+    self.report('powering on inverter ... ')
     self.inverter = Inverter()                # create object for inverter module
     self.PTH.on(module=self.inverter)         # power on inverter module
     self.check_communication_state(module=self.PTH)   # check write state
     self.check_on_state(module=self.inverter) # check inverter power state
 
   def off_inverter(self):
-    if self.verbosity > verbosity.quiet:
-      self.printf('powering off inverter ... ')
+    self.report('powering off inverter ... ')
     self.PTH.off(module=self.inverter)         # power off inverter module
     self.check_communication_state(module=self.PTH)    # check write state
     self.check_off_state(module=self.inverter) # check inverter power state
 
   def poll_rain(self):
-    if self.verbosity > verbosity.quiet:
-      self.printf('checking rain monitor ... ')
+    self.report('checking rain monitor ... ')
     self.PTH.poll_rain(module=self.rain)    # poll rain state
     self.check_communication_state(module=self.PTH) # check write state
     self.check_rain_state(module=self.rain) # check rain state
@@ -644,65 +670,56 @@ class Control(PowerModule):
     PTH_datum = self.PTH.poll_data()
     self.check_communication_state(module=self.PTH) # check write state
     self.data.append(PTH_datum=PTH_datum)   # append datum
-    if self.verbosity == verbosity.verbose:
-      self.printf('%s\n' % PTH_datum) # print PTH datum when verbose
+    self.detail('%s\n' % PTH_datum) # print PTH datum when verbose
 
   # RPC commands
   def init_RPC(self):
-    if self.verbosity > verbosity.quiet:
-      self.printf('initializing RPC module ... ')
+    self.report('initializing RPC module ... ')
     self.RPC = RPC()                        # init RPC module
     self.check_init_state(module=self.RPC)  # check RPC init state
 
   def on_radiometer(self):
-    if self.verbosity > verbosity.quiet:
-      self.printf('powering on radiometer ... ')
+    self.report('powering on radiometer ... ')
     self.radiometer = Radiometer()                # create object for radiometer module
     self.RPC.on(module=self.radiometer)           # power on radiometer module
     self.check_communication_state(module=self.RPC) # check write state
     self.check_on_state(module=self.radiometer)   # check radiometer power state
 
   def off_radiometer(self):
-    if self.verbosity > verbosity.quiet:
-      self.printf('powering off radiometer ... ')
+    self.report('powering off radiometer ... ')
     self.RPC.off(module=self.radiometer)           # power off radiometer module
     self.check_communication_state(module=self.RPC) # check write state
     self.check_off_state(module=self.radiometer)   # check radiometer power state
 
   def on_shutter(self):
-    if self.verbosity > verbosity.quiet:
-      self.printf('opening shutter ... ')
+    self.report('opening shutter ... ')
     self.shutter = Shutter()                 # create object for shutter module
     self.RPC.on(module=self.shutter)         # power on shutter module
     self.check_communication_state(module=self.RPC) # check write state
     self.check_on_state(module=self.shutter) # check shutter power state
 
   def off_shutter(self):
-    if self.verbosity > verbosity.quiet:
-      self.printf('closing shutter ... ')
+    self.report('closing shutter ... ')
     self.RPC.off(module=self.shutter)         # power off shutter module
     self.check_communication_state(module=self.RPC) # check write state
     self.check_off_state(module=self.shutter) # check shutter power state
 
   def on_laser(self):
-    if self.verbosity > verbosity.quiet:
-      self.printf('  powering on laser ... ')
+    self.report('  powering on laser ... ')
     self.laser = Laser()                   # create object for laser module
     self.RPC.on(module=self.laser)         # power on laser module
     self.check_communication_state(module=self.RPC) # check write state
     self.check_on_state(module=self.laser) # check laser power state
 
   def off_laser(self):
-    if self.verbosity > verbosity.quiet:
-      self.printf('  powering off laser ... ')
+    self.report('  powering off laser ... ')
     self.RPC.off(module=self.laser)         # power off laser
     self.check_communication_state(module=self.RPC) # check write state
     self.check_off_state(module=self.laser) # check laser power state
 
   # radiometer commands
   def init_radiometer(self):
-    if self.verbosity > verbosity.quiet:
-      self.printf('initializing radiometer ... ')
+    self.report('initializing radiometer ... ')
     self.radiometer.init()                         # init radiometer module
     self.check_communication_state(module=self.radiometer) # check write state
     self.check_init_state(module=self.radiometer)  # check radiometer conf state
@@ -712,83 +729,63 @@ class Control(PowerModule):
     self.check_communication_state(module=self.radiometer)
     self.data.append(radiometer_datum=radiometer_datum)
 
-  # data command
-  def write_data(self):
-    if self.verbosity > verbosity.quiet:
-      self.printf('writing data ... ')
-    self.data.write() # format and save data
-    if self.verbosity > verbosity.quiet:
-      self.printf('done\n',color=self.GREEN)
-
   # state checks
   def check_init_state(self,module=None):
     if module.conf_state == conf_state.initialized:
-      if self.verbosity > verbosity.quiet:
-        self.printf('done\n',color=self.GREEN)
-      if self.verbosity == verbosity.verbose:
-        print module.message
+      self.report('done\n',color=self.GREEN)
+      self.detail('%s\n' % module.message)
     elif module.conf_state == conf_state.undefined or module.conf_state == conf_state.finalized:
-      self.printf('failed\n',color=self.RED)
-      self.printf('%s\n\n' % module.message)
+      self.inform('failed\n',color=self.RED)
+      self.inform('%s\n' % module.message)
       self.emergency_shutdown()
     elif module.conf_state == conf_state.error:
-      self.printf('error\n',color=self.RED)
-      self.printf('%s\n\n' % module.message)
+      self.inform('error\n',color=self.RED)
+      self.inform('%s\n' % module.message)
       self.emergency_shutdown()
 
   def check_final_state(self,module=None):
     if module.conf_state == conf_state.finalized:
-      if self.verbosity > verbosity.quiet:
-        self.printf('done\n',color=self.GREEN)
-      if self.verbosity == verbosity.verbose:
-        print module.message
+      self.report('done\n',color=self.GREEN)
+      self.detail('%s\n' % module.message)
     elif module.conf_state == conf_state.undefined or module.conf_state == conf_state.initialized:
-      self.printf('failed\n',color=self.RED)
-      self.printf('%s\n\n' % module.message)
+      self.inform('failed\n',color=self.RED)
+      self.inform('%s\n' % module.message)
       self.emergency_shutdown(module_no_off=module)
     elif module.conf_state == conf_state.error:
-      self.printf('error\n',color=self.RED)
-      self.printf('%s\n\n' % module.message)
+      self.inform('error\n',color=self.RED)
+      self.inform('%s\n' % module.message)
       self.emergency_shutdown(module_no_off=module)
 
   def check_on_state(self,module=None):
     if module.power_state == power_state.on:
-      if self.verbosity > verbosity.quiet:
-        self.printf('done\n',color=self.GREEN)
-      if self.verbosity == verbosity.verbose:
-        print module.message
+      self.report('done\n',color=self.GREEN)
+      self.detail('%s\n' % module.message)
     elif module.power_state == power_state.undefined or module.power_state == power_state.off:
-      self.printf('failed\n',color=self.RED)
-      self.printf('%s\n\n' % module.message)
+      self.inform('failed\n',color=self.RED)
+      self.inform('%s\n' % module.message)
       self.emergency_shutdown()
 
   def check_off_state(self,module=None):
     if module.power_state == power_state.off:
-      if self.verbosity > verbosity.quiet:
-        self.printf('done\n',color=self.GREEN)
-      if self.verbosity == verbosity.verbose:
-        print module.message
+      self.report('done\n',color=self.GREEN)
+      self.detail('%s\n' % module.message)
     elif module.power_state == power_state.undefined or module.power_state == power_state.on:
-      self.printf('failed\n',color=self.RED)
-      self.printf('%s\n\n' % module.message)
+      self.inform('failed\n',color=self.RED)
+      self.inform('%s\n' % module.message)
       self.emergency_shutdown(module_no_off=module)
 
   def check_rain_state(self,module=None):
     if module.rain_state == rain_state.dry:
-      if self.verbosity > verbosity.quiet:
-        self.printf('dry\n',color=self.GRAY)
-      if self.verbosity == verbosity.verbose:
-        print module.message
+        self.report('dry\n',color=self.GRAY)
+        self.detail('%s\n' % module.message)
     elif module.rain_state == rain_state.wet:
-      if self.verbosity > verbosity.quiet:
-        self.printf('wet\n',color=self.BLUE)
-        self.printf('%s\n\n' % module.message)
+      self.report('wet\n',color=self.BLUE)
+      self.report('%s\n' % module.message)
       if self.phase != phase.final:
         self.emergency_shutdown()
     elif module.rain_state == rain_state.open:
-      if self.verbosity > verbosity.quiet:
-        self.printf('open\n',color=self.YELLOW)
-        self.printf('%s\n\n' % module.message)
+      self.report('open\n',color=self.YELLOW)
+      self.report('%s\n' % module.message)
       if self.phase != phase.final:
         #self.emergency_shutdown() # TODO: get rain sensor
         pass
@@ -806,16 +803,15 @@ class Control(PowerModule):
     To avoid an open loop, we will not try to final or power off any module
     that won't do so.
     '''
-    self.verbosity = verbosity.verbose
     self.modules_no_off.append(module_no_off)
-    if self.verbosity > verbosity.quiet:
-      self.printf('shutting down 5kmlas\n')
+    self.verbosity = verbosity.verbose
+    self.inform('\nshutting down 5kmlas\n')
     # if laser module exists and isn't the module that won't turn off
     if self.laser and not self.laser in self.modules_no_off:
       if self.laser.power_state == power_state.on:
         self.off_laser()
-        # if the laser is on, then there may be some data
-        self.data.write() # try to save whatever data we have
+        self.read_radiometer_data() # if the laser is on, then there may be some data
+        self.data.write()           # try to save whatever data we have
     if self.shutter and not self.shutter in self.modules_no_off:
       if self.shutter.power_state == power_state.on:
         self.off_shutter()
@@ -836,13 +832,57 @@ class Control(PowerModule):
 
 # operation classes ############################################################
 
+class FIFO:
+  '''
+  setup posix fifo-based IPC between the daemon process and an operator process
+  or a calibrator process
+
+  There should never be more than one Operator class instance (operator or
+  calibrator object) at any time.
+
+  All communications from the operator and calibrator objects to the PTH board
+  pass through the IPC fifos.
+  '''
+  def __init__(self,direction=None,side=None):
+    self.buffer_size = 65536 # = 2**2**2**2
+    # fifo direction: from operator or calibrator to daemon or from daemon to operator or calibrator
+    if direction == direction.to_daemon:
+      self.name = '/tmp/5kmlas_to_daemon'
+      os.mkfifo(self.name)   # create to-daemon fifo
+      if side == side.daemon:
+        options = os.O_NDELAY|os.O_RDONLY
+      elif side == side.operator or side == side.calibrator:
+        options = os.O_NDELAY|os.O_WRONLY
+    elif direction == direction.from_deamon:
+      self.name = '/tmp/5kmlas_from_daemon'
+      os.mkfifo(self.name)   # create from-daemon fifo
+      if side == side.daemon:
+        options = os.O_NDELAY|os.O_WRONLY
+      elif side == side.operator or side == side.calibrator:
+        options = os.O_NDELAY|os.O_RDONLY
+    self.fd = os.open(self.name,options)
+
+  def __del__(self):
+    os.close(self.fd)      # close file descriptor
+    if os.path.exists(self.name):
+      os.remove(self.name) # delete fifo
+
 class Daemon:
   '''
   5kmlas daemon process
+
+  Like the operator object, the daemon object interacts with the control module
+  in a scripted manner.  Its jobs are to log PTH information and write all
+  data.  When no operator object is present (in a second process), the daemon
+  object will log PTH information infrequently.  When there is a second process
+  containing an operator object, it will log PTH information frequently.
   '''
 
   def __init__(self,opts):
     self.control = Control(opts) # control module
+    self.disconnected_sleep = 5  # run loop sleep when not connected to an operator process
+    self.fifo_to_daemon = FIFO(direction='to daemon')     # create inbound fifo
+    self.fifo_from_daemon = FIFO(direction='from daemon') # create outbound fifo
 
   def init(self):
     self.control.phase = phase.init
@@ -851,31 +891,63 @@ class Daemon:
     self.control.poll_rain()       # check rain state
     self.control.on_heater()       # power on window heater
 
-  # TODO: add ipc hooks to communicate with operator or calibrator processes and to write out data files
+  def run(self):
+    while (True):
+      sleep(2)
+      data = self.read_fifo_to_daemon()
+      if len(data) > 0:
+        print data
+
+  def read_fifo_to_daemon(self):
+    try:
+      data = os.read(self.fifo_to_daemon.fd,self.buffer_size)
+    except OSError:
+      data = '' # only read from fifo if there's data in it
+    return data
+
   def run(self):
     self.control.phase = phase.run
-    if self.verbosity > verbosity.quiet:
-      self.control.printf('collecting data\n',color=self.control.GRAY)
+    self.control.report('collecting data\n',color=self.control.GRAY)
+    sleep_time = self.disconnected_sleep # wait longer between PTH data polls when disconnected
+    two_hours = timedelta(hours=2)
+    now = start_time = datetime.utcnow()
     while (True):
-      one_hour = timedelta(hours=1)
-      now = start_time = datetime.utcnow()
-      while (now < self.start_time + one_hour): # collect data for one hour
-        self.control.collect_PTH_datum()        # collect PTH data about every 5 minutes
-        if self.control.verbosity == True:
-          print PTH_datum                       # print PTH datum when verbose
-        sleep(5*60)                             # sleep for 5 minutes
-        now = datetime.utcnow()
-    if self.verbosity > verbosity.quiet:
-      # this process should never end under normal circumstances
-      self.control.printf('done collecting\n',color=self.control.GRAY)
+      elapsed = now + start_time
+      if elapsed >= two_hours:
+        now = start_time = datetime.utcnow()
+        self.control.write_data()                  # write data once every 2 hours
+      if abs(elapsed/five_mintues.minutes - timedelta(seconds=5)) # TODO: figure this out
 
+  def run(self):
+    self.control.phase = phase.run
+    self.control.report('collecting data\n',color=self.control.GRAY)
+    sleep_time = self.disconnected_sleep # wait longer between PTH data polls when disconnected
+    while (True):
+      while (now < self.start_time + two_hours): # collect data for 2 hours
+        self.control.collect_PTH_datum()         # collect PTH data about every 5 minutes
+        self.control.detail('%s\n' % PTH_datum)  # print PTH datum when verbose
+        self.operator.stdin.write(PTH_datum)     # TODO: tell operator PTH data so it can print it out
+        five_minutes = timedelta(minutes=5)
+        sleep(five_minutes.seconds)              # sleep for 5 minutes
+        now = datetime.utcnow()
+      # this process should never end under normal circumstances
+      self.control.report('done collecting\n',color=self.control.GRAY)
+
+  # TODO: figure out how to gracefully end daemon from command line
   def final(self):
+    self.control.phase = phase.final
     self.control.off_heater() # power off window heater
     self.control.off_rain()   # power off rain monitor
 
 class Operator:
   '''
   operate 5kmlas system
+
+  The control module object provides a high-level interface to each of the
+  physical serial and power modules, handles errors, and automatically shuts
+  the modules down intelligently in the case of error.  The operator class
+  provides the recipie for operation, like a person operating a control panel
+  with a checklist.
   '''
 
   def __init__(self,opts):
@@ -883,10 +955,7 @@ class Operator:
 
   def init(self):
     self.control.phase = phase.init
-    self.control.init_PTH()        # init PTH board
-    self.control.on_rain()         # power on rain monitor
-    self.control.poll_rain()       # check rain state
-    self.control.on_heater()       # power on window heater
+    # TODO: connect to daemon
     self.control.on_inverter()     # power on inverter
     self.control.init_RPC()        # init RPC
     self.control.on_radiometer()   # power on radiometer
@@ -895,33 +964,28 @@ class Operator:
 
   def run(self):
     self.control.phase = phase.run
-    if self.control.verbosity > verbosity.quiet:
-      self.control.printf('collecting data\n',color=self.control.GRAY)
+    self.control.report('collecting data\n',color=self.control.GRAY)
     five_minutes = timedelta(seconds=10)
     now = self.start_time = datetime.utcnow()     # record laser on time
     self.control.on_laser()                       # power on laser
     while (now < self.start_time + five_minutes): # run for 5 minutes
-      self.control.collect_PTH_datum() ; sleep(5) # collect PTH data about every 5 seconds
-      now = datetime.utcnow()
+      sleep(1) ; now = datetime.utcnow()
     self.control.off_laser()                      # power off laser
     self.stop_time = datetime.utcnow()            # record laser off time
-    if self.control.verbosity > verbosity.quiet:
-      self.control.printf('done collecting\n',color=self.control.GRAY)
+    self.control.report('done collecting\n',color=self.control.GRAY)
 
   def final(self):
     self.control.phase = phase.final
     self.control.off_shutter()                      # close shutter
-    self.control.read_radiometer_data()             # read radiometer data
-    self.control.data.append(start=self.start_time,stop=self.stop_time) # collect run times
-    self.control.write_data()                       # write data
+    self.daemon.control.read_radiometer_data()      # TODO: read radiometer data
+    self.daemon.control.data.append(start=self.start_time,stop=self.stop_time) # TODO: collect run times
+    self.daemon.control.write_data()                # TODO: write data
     self.control.off_radiometer()                   # power off radiometer
     self.control.off_inverter()                     # power off inverter
-    self.control.off_heater()                       # power off window heater
-    self.control.off_rain()                         # power off rain monitor
-    if self.control.verbosity == verbosity.verbose: # print all data when verbose
-      print self.control.data.radiometer
-      print self.control.data.PTH
-      print self.control.data.times
+    # print all data when verbose
+    self.control.detail('%s\n' % self.control.data.radiometer)
+    self.control.detail('%s\n' % self.control.data.PTH)
+    self.control.detail('%s\n' % self.control.data.times)
 
 # main #########################################################################
 
@@ -931,19 +995,25 @@ def parse_opts():
   '''
   opt_parser = OptionParser(description='Run 5 km laser calibration system.',version='%prog-0.3')
   opt_parser.add_option('-m','--mode',default='operate',type=str,
-      help='"operate"   - middle drum operations [default], '
+      help='"operate"   - Middle Drum operations [default], '
       '"calibrate" - 5kmlas calibration,              '
       '"daemon"    - run background helper process')
   opt_parser.add_option('-c','--color',action='store_const',const=True,
       default=True,help='print messages in color [default]')
-  verbose = OptionGroup(opt_parser,'Verbosity Options','More quiet options take precedent over more verbose options when more than one is supplied.')
+  # TODO:
+  # - make a 'run' option that is a synonym to 'operate'
+  # - make 'mode' option a positional argument
+
+  verbose = OptionGroup(opt_parser,'Verbosity Options',
+      'More quiet options take precedent over more verbose options when more than one is supplied.')
   verbose.add_option('-q','--quiet',action='store_const',const=True,
       default=False,help='print nothing except errors')
   verbose.add_option('-n','--normal',action='store_const',const=True,
-      default=False,help='print normal operation messages [default]')
+      default=False,help='print normal operation messages [default] and errors')
   verbose.add_option('-v','--verbose',action='store_const',const=True,
-      default=False,help='print data and serial commands and responses')
+      default=False,help='print data and serial commands and responses, normal messages, and errors')
   opt_parser.add_option_group(verbose)
+
   opts,args = opt_parser.parse_args()
 
   # handle tri-state verbosity option: prefer most quiet option supplied
