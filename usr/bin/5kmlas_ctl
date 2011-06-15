@@ -99,8 +99,9 @@ rain_state = Enum('dry wet open')
 # serial states
 communication_state = Enum('success error timeout')
 # FIFO IPC
-direction = Enum('to_daemon from_daemon')
+name = Enum('to_daemon from_daemon')
 side = Enum('daemon operator calibrator')
+command = Enum('initializing_fifo on_inverter off_inverter poll_rain collect_PTH_datum finalizing_fifo')
 
 class Data:
   def __init__(self):
@@ -543,6 +544,7 @@ class Control(PowerModule):
     if opts.color:                       # colorful output
       self.color = opts.color
 
+    self.message_buffer = [] # daemon messages can be printed on sys.stdout and stored here
     self.setup_color()
     self.setup_modules()
     # TODO: connect to daemon process.  If it's not there, launch it?
@@ -803,7 +805,8 @@ class Control(PowerModule):
     To avoid an open loop, we will not try to final or power off any module
     that won't do so.
     '''
-    self.modules_no_off.append(module_no_off)
+    if module_no_off:
+      self.modules_no_off.append(module_no_off)
     self.verbosity = verbosity.verbose
     self.inform('\nshutting down 5kmlas\n')
     # if laser module exists and isn't the module that won't turn off
@@ -832,6 +835,34 @@ class Control(PowerModule):
 
 # operation classes ############################################################
 
+def is_at_timepoint(t,d,e):
+  '''
+  test whether the current time t is within an epsilon e of one of the
+  timepoints n defined by n*d = 1 day, where d is a time difference
+  
+  It is expected that d will be within the range 1 <= d <= 86400 s.
+  '''
+  day = timedelta(days=1)
+  n = 0 # number of timepoints within a day
+  while (True):
+    if n*d >= day:
+      break
+    n += 1
+
+  timepoints = []
+  for i in xrange(n):
+    h = i*(d.seconds/3600)
+    m = i*(d.seconds%3600/60)
+    s = i*(d.seconds%3600%60)
+    timepoints.append(timedelta(hours=h,minutes=m,seconds=s))
+
+  # treat current time as timedelta from beginning of day
+  h,m,s = t.timetuple()[3:6]
+  now = timedelta(hours=h,minutes=m,seconds=s)
+  for timepoint in timepoints:
+    if abs(now - timepoint) <= e:
+      return True
+
 class FIFO:
   '''
   setup posix fifo-based IPC between the daemon process and an operator process
@@ -843,17 +874,17 @@ class FIFO:
   All communications from the operator and calibrator objects to the PTH board
   pass through the IPC fifos.
   '''
-  def __init__(self,direction=None,side=None):
+  def __init__(self,name=None,side=None):
     self.buffer_size = 65536 # = 2**2**2**2
-    # fifo direction: from operator or calibrator to daemon or from daemon to operator or calibrator
-    if direction == direction.to_daemon:
+    # fifo name: from operator or calibrator to daemon or from daemon to operator or calibrator
+    if name == name.to_daemon:
       self.name = '/tmp/5kmlas_to_daemon'
       os.mkfifo(self.name)   # create to-daemon fifo
       if side == side.daemon:
         options = os.O_NDELAY|os.O_RDONLY
       elif side == side.operator or side == side.calibrator:
         options = os.O_NDELAY|os.O_WRONLY
-    elif direction == direction.from_deamon:
+    elif name == name.from_deamon:
       self.name = '/tmp/5kmlas_from_daemon'
       os.mkfifo(self.name)   # create from-daemon fifo
       if side == side.daemon:
@@ -867,6 +898,15 @@ class FIFO:
     if os.path.exists(self.name):
       os.remove(self.name) # delete fifo
 
+  def read(self):
+    '''
+    return a list of the line of data read
+    '''
+    pass
+
+  def send(self):
+    pass
+
 class Daemon:
   '''
   5kmlas daemon process
@@ -879,10 +919,29 @@ class Daemon:
   '''
 
   def __init__(self,opts):
+    opts
     self.control = Control(opts) # control module
     self.disconnected_sleep = 5  # run loop sleep when not connected to an operator process
-    self.fifo_to_daemon = FIFO(direction='to daemon')     # create inbound fifo
-    self.fifo_from_daemon = FIFO(direction='from daemon') # create outbound fifo
+    self.connected_sleep = 1     # run loop sleep when connected to an operator process
+    self.command_to_daemon = FIFO(name=name.to_daemon)     # create inbound fifo
+    self.command_from_daemon = FIFO(name=name.from_daemon) # create outbound fifo
+
+  def __del__(self):
+    '''
+    since __del__ execution occurs when the python interpreter is
+    self-destructing, we will hazard issuing these two commands to the PTH
+    without checking whether they succeed or trigger any errors
+    '''
+    # daemon process should never end under normal circumstances
+    self.control.report('done running\n',color=self.control.GRAY)
+    try:
+      self.control.PTH.off(module=self.control.heater) # power off heater module
+    except:
+      pass
+    try:
+      self.control.PTH.off(module=self.control.rain)   # power off rain monitor
+    except:
+      pass
 
   def init(self):
     self.control.phase = phase.init
@@ -891,49 +950,62 @@ class Daemon:
     self.control.poll_rain()       # check rain state
     self.control.on_heater()       # power on window heater
 
-  def run(self):
-    while (True):
-      sleep(2)
-      data = self.read_fifo_to_daemon()
-      if len(data) > 0:
-        print data
-
-  def read_fifo_to_daemon(self):
+  def read_command(self):
     try:
-      data = os.read(self.fifo_to_daemon.fd,self.buffer_size)
+      return int(os.read(self.command_to_daemon.fd,self.buffer_size))
     except OSError:
-      data = '' # only read from fifo if there's data in it
-    return data
+      return None
+
+  def write_command(self,data)
+    return os.write(self.command_from_daemon.fd,self.buffer_size)
+
+  def read_data(self):
+    try:
+      return os.read(self.data_to_daemon.fd,self.buffer_size)
+    except OSError:
+      return None
+
+  def write_data(self):
+    pass
+
+  def operator_run(self):
+    while (True):
+      if command.on_inverter in self.read_command():
+        self.control.on_inverter()
+      if self.read_command() == command.off_inverter:
+        self.control.off_inverter()
+      if self.read_command() == command.poll_rain:
+        self.control.poll_rain()
+      if self.read_command() == command.collect_PTH_datum:
+        self.control.collect_PTH_datum()
+        self.write_data(PTH_datum)
+      if self.read_command() == command.finalizing_fifo:
+        return
+      sleep(self.connected_sleep)
 
   def run(self):
     self.control.phase = phase.run
-    self.control.report('collecting data\n',color=self.control.GRAY)
-    sleep_time = self.disconnected_sleep # wait longer between PTH data polls when disconnected
-    two_hours = timedelta(hours=2)
-    now = start_time = datetime.utcnow()
+    self.control.report('running\n',color=self.control.GRAY)
+    # datetime comparison epsilons need to be less than the completion time
+    # of one loop, so we set it to be less than the sleep time and ensure that
+    # the sleep time is longer than the time it takes to complete any
+    # conditional block within the loop
+    epsilon = timedelta(seconds=self.disconnected_sleep-1) # 1 s less than sleep time
     while (True):
-      elapsed = now + start_time
-      if elapsed >= two_hours:
-        now = start_time = datetime.utcnow()
-        self.control.write_data()                  # write data once every 2 hours
-      if abs(elapsed/five_mintues.minutes - timedelta(seconds=5)) # TODO: figure this out
+    	now = datetime.utcnow()
+      # test whether the current time is within epsilon of a timepoint, where
+      # the timepoints are the divisions of the current day by the supplied
+      # timedelta
+      if is_at_timepoint(now,timedelta(hours=2),epsilon):
+        self.control.write_data()
+      if is_at_timepoint(now,timedelta(minutes=15),epsilon):
+        self.control.collect_PTH_datum()
+      if int(self.read_command()) == command.initializing_fifo: # if operator process begun, enter run loop
+        self.operator_run()
+      else:
+        sleep(self.disconnected_sleep)
+    # TODO: should I make Daemon and Operator subclasses of Control?  The separation was nice for a classical organizational setup, but it separated the state checking out of the scripted objects (daemon, operator).  I wanted the scripted objects to be as simple as possible, but with the control module in charge of all of the message printing and state handling, it makes it unacceptably complex to check the state in one object and then print the corresponding messages and shutdown the system in another object, possibly even in another process.  The split-process shutdown issue would have/will need to be resolved anyway.
 
-  def run(self):
-    self.control.phase = phase.run
-    self.control.report('collecting data\n',color=self.control.GRAY)
-    sleep_time = self.disconnected_sleep # wait longer between PTH data polls when disconnected
-    while (True):
-      while (now < self.start_time + two_hours): # collect data for 2 hours
-        self.control.collect_PTH_datum()         # collect PTH data about every 5 minutes
-        self.control.detail('%s\n' % PTH_datum)  # print PTH datum when verbose
-        self.operator.stdin.write(PTH_datum)     # TODO: tell operator PTH data so it can print it out
-        five_minutes = timedelta(minutes=5)
-        sleep(five_minutes.seconds)              # sleep for 5 minutes
-        now = datetime.utcnow()
-      # this process should never end under normal circumstances
-      self.control.report('done collecting\n',color=self.control.GRAY)
-
-  # TODO: figure out how to gracefully end daemon from command line
   def final(self):
     self.control.phase = phase.final
     self.control.off_heater() # power off window heater
@@ -955,7 +1027,7 @@ class Operator:
 
   def init(self):
     self.control.phase = phase.init
-    # TODO: connect to daemon
+    # TODO: connect to daemon, wait for daemon response
     self.control.on_inverter()     # power on inverter
     self.control.init_RPC()        # init RPC
     self.control.on_radiometer()   # power on radiometer
