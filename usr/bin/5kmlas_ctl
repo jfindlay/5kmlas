@@ -98,7 +98,8 @@ communication_state = Enum('success error timeout')
 # FIFO IPC
 direction = Enum('to_daemon from_daemon')
 side = Enum('daemon operator calibrator')
-command = Enum('initializing_fifo on_inverter off_inverter poll_rain collect_PTH_datum finalizing_fifo')
+fifo_type = Enum('signal command')
+signal = Enum('initialize error finalize')
 
 class Data:
   def __init__(self):
@@ -500,7 +501,7 @@ class Laser(PowerModule):
     self.RPC_message = ''                    # RPC message
     self.message = ''                        # result message
 
-# control modules ###############################################################
+# control modules ##############################################################
 
 def is_at_timepoint(t,d,e):
   '''
@@ -538,22 +539,29 @@ class FIFO:
   There should never be more than one Operator class instance (operator or
   calibrator object) at any time.
 
-  All communications from the operator and calibrator objects to the PTH board
-  pass through the IPC fifos.
+  All communications from the operator and calibrator objects to the hardware
+  modules pass through the IPC fifos.
   '''
-  def __init__(self,direction=None,side=None):
+  def __init__(self,direction=None,side=None,fifo_type=None):
     self.buffer_size = 65536 # = 2**2**2**2
     self.direction = direction
     self.side = side
+    self.type = fifo_type
     if direction == direction.to_daemon:
-      self.name = '/tmp/5kmlas_to_daemon'
+      if fifo_type == fifo_type.signal:
+        self.name = '/tmp/5kmlas_signal_to_daemon'
+      elif fifo_type == fifo_type.command:
+        self.name = '/tmp/5kmlas_command_to_daemon'
       os.mkfifo(self.name)   # create to-daemon fifo
       if side == side.daemon:
         options = os.O_NDELAY|os.O_RDONLY
       elif side == side.operator or side == side.calibrator:
         options = os.O_NDELAY|os.O_WRONLY
     elif direction == direction.from_deamon:
-      self.name = '/tmp/5kmlas_from_daemon'
+      if fifo_type == fifo_type.signal:
+        self.name = '/tmp/5kmlas_signal_from_daemon'
+      elif fifo_type == fifo_type.command:
+        self.name = '/tmp/5kmlas_command_from_daemon'
       os.mkfifo(self.name)   # create from-daemon fifo
       if side == side.daemon:
         options = os.O_NDELAY|os.O_WRONLY
@@ -572,13 +580,12 @@ class FIFO:
     '''
     pass
     try:
-      return [line for line in os.read(self.command_to_daemon.fd,self.buffer_size)]
+      return [line for line in os.read(self.fd,self.buffer_size)]
     except OSError:
       return []
 
-
-  def send(self):
-    pass
+  def send(self,data):
+    os.write(self.fd,data)
 
 class Control:
   '''
@@ -620,10 +627,8 @@ class Control:
     if opts.color:                       # colorful output
       self.color = opts.color
 
-    self.message_buffer = [] # daemon messages can be printed on sys.stdout and stored here
     self.setup_color()
     self.setup_modules()
-    # TODO: connect to daemon process.  If it's not there, launch it?
 
   def setup_color(self):
     # modified from https://svn.blender.org/svnroot/bf-blender/trunk/blender/tools/bcolors.py
@@ -669,6 +674,7 @@ class Control:
     write error information to sys.stdout even in quiet mode
     '''
     self.printf(self,data,color=color)
+    self.write_command("self.printf(self,%s,color=%s)" % (data,color))
 
   def report(self,data,color=None):
     '''
@@ -676,6 +682,7 @@ class Control:
     '''
     if self.verbosity > verbosity.quiet:
       self.printf(self,data,color=color)
+    self.write_command("if self.verbosity > verbosity.quiet : self.printf(self,%s,color=%s)" % (data,color))
 
   def detail(self,data,color):
     '''
@@ -683,6 +690,7 @@ class Control:
     '''
     if self.verbosity == verbosity.verbose:
     self.printf(self,data,color=color)
+    self.write_command("if self.verbosity == verbosity.verbose : self.printf(self,%s,color=%s)" % (data,color))
 
   # state checks
   def check_init_state(self,module=None):
@@ -787,123 +795,9 @@ class Control:
     # TODO: perhaps set a flag on the SBC to not run again if there is a problem
     sys.exit(1) # system should now be in as safe of a state as possible
 
-class Daemon(Control):
-  '''
-  5kmlas daemon process
-
-  Like the operator object, the daemon object interacts with the modules in a
-  scripted manner.  Its jobs are to log PTH information and write all data.
-  When no operator object is present (in a second process), the daemon object
-  will log PTH information infrequently.  When there is a second process
-  containing an operator object, it will log PTH information frequently.
-  '''
-
-  def __init__(self,opts):
-    super(Daemon,self).__init__(opts) # daemon is a control module
-    self.disconnected_sleep = 5  # run loop sleep when not connected to an operator process
-    self.connected_sleep = 1     # run loop sleep when connected to an operator process
-    self.command_to_daemon = FIFO(name=name.to_daemon)     # command inbound fifo
-    self.command_from_daemon = FIFO(name=name.from_daemon) # command outbound fifo
-    self.data_to_daemon = FIFO(name=name.to_daemon)        # data inbound fifo
-    self.data_from_daemon = FIFO(name=name.from_daemon)    # data outbound fifo
-
-  def __del__(self):
-    '''
-    since __del__ execution occurs when the python interpreter is
-    self-destructing, we will hazard issuing these two commands to the PTH
-    board without checking whether they succeed or trigger any errors
-    '''
-    self.report('done running\n',color=self.GRAY)
-    self.phase = phase.final
-    try:
-      self.PTH.off(module=self.heater) # power off heater module
-    except:
-      pass
-    try:
-      self.PTH.off(module=self.rain)   # power off rain monitor
-    except:
-      pass
-
-  def read_command(self):
-    try:
-      return [int(c) for c in self.command_to_daemon.read()]
-    except ValueError:
-      return []
-
-  def write_command(self,data)
-    return self.command_from_daemon.write(data)
-
-  def read_data(self):
-    return os.read(self.data_to_daemon.fd,self.buffer_size)
-
-  def write_data(self):
-    return os.write(self.data_from_daemon.fd,self.buffer_size)
-
-  def init(self):
-    self.phase = phase.init
-    self.init_data()       # init data structure
-    self.init_PTH()        # init PTH board
-    self.on_rain()         # power on rain monitor
-    self.poll_rain()       # check rain state
-    self.on_heater()       # power on window heater
-
-  def operator_run(self):
-    commands = self.read_command()            # check IPC from operator process
-    if command.initializing_fifo in commands: # if operator process begun, enter run loop
-      self.report('connecting to operator process\n')
-      while (True):
-        if command.on_inverter in commands:
-          self.on_inverter()
-        if command.off_inverter in commands:
-          self.off_inverter()
-        if command.poll_rain in commands:
-          self.poll_rain()
-        if command.collect_PTH_datum in commands:
-          PTH_datum = self.collect_PTH_datum()
-          self.write_data('%s\n' % PTH_datum)
-        if command.finalizing_fifo in commands:
-          self.report('disconnecting from operator process\n')
-          return
-        # TODO: check if operator process is still running.  If not, connect to RPC and radiometer to shut things down
-        sleep(self.connected_sleep)
-        commands = self.read_command()
-    else:
-      return
-
-  def run(self):
-    self.phase = phase.run
-    self.report('running\n',color=self.GRAY)
-    # datetime comparison epsilon needs to be less than the completion time of
-    # one loop, so that it doesn't trigger a conditional block again for the
-    # same event and timepoint in the next loop.  It also needs to be longer
-    # than the time it takes to complete all of the conditional blocks, so that
-    # a timepoint conditional is guaranteed to be true for all conditional
-    # blocks in the loop.  We set epsilon to be less than sleep time and ensure
-    # that sleep time - epsilon is longer than the time it takes to complete
-    # every conditional block within the following while loop.
-    #
-    # Each conditional tests whether the current time is within epsilon of a
-    # timepoint, where the timepoints are the divisions of a UTC day by the
-    # supplied timedelta.
-    epsilon = timedelta(seconds=self.disconnected_sleep-1)   # 1 s less than sleep time
-    while (True):
-      now = datetime.utcnow()
-      self.operator_run()
-      if is_at_timepoint(now,timedelta(hours=2),epsilon):    # once every 2 hours
-        self.write_data()
-      if is_at_timepoint(now,timedelta(minutes=15),epsilon): # once every 15 minutes
-        self.collect_PTH_datum()
-      else:
-        sleep(self.disconnected_sleep)
-
-  def final(self):
-    self.phase = phase.final
-    self.off_heater() # power off window heater
-    self.off_rain()   # power off rain monitor
-
   # data commands
   def init_data(self):
-    self.data = Data()      # data structure
+    self.data = Data() # data structure
 
   def write_data(self):
     self.report('writing data ... ')
@@ -969,57 +863,6 @@ class Daemon(Control):
     self.detail('%s\n' % PTH_datum) # print PTH datum when verbose
     return PTH_datum
 
-class Operator(Control):
-  '''
-  operate 5kmlas system
-
-  The Operator module interfaces with the physical of the system in a scripted
-  manner.  It is a subclass of the Control module, which provides state
-  checking and automatic shut down.  The operator object and daemon object also
-  perform a scripted conversation during the run phase.  This is necessary
-  since the daemon process must be running constantly to monitor and log
-  environment information, and the operator process is initiated by either
-  Middle Drum or as part of a calibration run.
-
-  '''
-
-  def __init__(self,opts):
-    super(Operator,self).__init__(opts) # subclass of control module
-
-  def init(self):
-    self.phase = phase.init
-    # TODO: connect to daemon, wait for daemon response
-    self.on_inverter()     # power on inverter
-    self.init_RPC()        # init RPC
-    self.on_radiometer()   # power on radiometer
-    self.init_radiometer() # init radiometer
-    self.on_shutter()      # power on shutter
-
-  def run(self):
-    self.phase = phase.run
-    self.report('collecting data\n',color=self.GRAY)
-    five_minutes = timedelta(seconds=10)
-    now = self.start_time = datetime.utcnow()     # record laser on time
-    self.on_laser()                       # power on laser
-    while (now < self.start_time + five_minutes): # run for 5 minutes
-      sleep(1) ; now = datetime.utcnow()
-    self.off_laser()                      # power off laser
-    self.stop_time = datetime.utcnow()            # record laser off time
-    self.report('done collecting\n',color=self.GRAY)
-
-  def final(self):
-    self.phase = phase.final
-    self.off_shutter()                      # close shutter
-    self.daemon.control.read_radiometer_data()      # TODO: read radiometer data
-    self.daemon.control.data.append(start=self.start_time,stop=self.stop_time) # TODO: collect run times
-    self.daemon.control.write_data()                # TODO: write data
-    self.off_radiometer()                   # power off radiometer
-    self.off_inverter()                     # power off inverter
-    # print all data when verbose
-    self.detail('%s\n' % self.data.radiometer)
-    self.detail('%s\n' % self.data.PTH)
-    self.detail('%s\n' % self.data.times)
-
   # RPC commands
   def init_RPC(self):
     self.report('initializing RPC module ... ')
@@ -1076,6 +919,191 @@ class Operator(Control):
     radiometer_datum = self.radiometer.read_data()
     self.check_communication_state(module=self.radiometer)
     self.data.append(radiometer_datum=radiometer_datum)
+
+class Daemon(Control):
+  '''
+  5kmlas daemon process
+
+  Like the operator object, the daemon object interacts with the modules in a
+  scripted manner.  Its jobs are to log PTH information and write all data.
+  When no operator object is present (in a second process), the daemon object
+  will log PTH information infrequently.  When there is a second process
+  containing an operator object, it will log PTH information frequently.
+  '''
+
+  def __init__(self,opts):
+    super(Daemon,self).__init__(opts) # daemon is a control module
+    self.disconnected_sleep = 5  # run loop sleep when not connected to an operator process
+    self.connected_sleep = 1     # run loop sleep when connected to an operator process
+    self.signal_to_daemon   = FIFO(side=side.daemon,direction=direction.to_daemon)   # signal inbound fifo
+    self.signal_from_daemon = FIFO(side=side.daemon,direction=direction.from_daemon) # signal outbound fifo
+    self.command_to_daemon      = FIFO(side=side.daemon,direction=direction.to_daemon)   # command inbound fifo
+    self.command_from_daemon    = FIFO(side=side.daemon,direction=direction.from_daemon) # command outbound fifo
+
+  def __del__(self):
+    '''
+    since __del__ execution occurs when the python interpreter is
+    self-destructing, we will hazard issuing these two commands to the PTH
+    board without checking whether they succeed or trigger any errors
+    '''
+    self.report('done running\n',color=self.GRAY)
+    self.phase = phase.final
+    try:
+      self.PTH.off(module=self.heater) # power off heater module
+    except:
+      pass
+    try:
+      self.PTH.off(module=self.rain)   # power off rain monitor
+    except:
+      pass
+
+  def read_signal(self):
+    try:
+      return [int(c) for c in self.signal_to_daemon.read()]
+    except ValueError:
+      return []
+
+  def write_signal(self,data)
+    return self.signal_from_daemon.write(data)
+
+  def read_command(self):
+    return self.command_to_daemon.write()
+
+  def write_command(self,data):
+    return self.command_from_daemon.write(data)
+
+  def init(self):
+    self.phase = phase.init
+    self.init_data()       # init data structure
+    self.init_PTH()        # init PTH board
+    self.on_rain()         # power on rain monitor
+    self.poll_rain()       # check rain state
+    self.on_heater()       # power on window heater
+
+  def operator_communicate(self):
+    signals = self.read_signal()            # check IPC from operator process
+    if signal.initializing_fifo in signals: # do operator init
+      self.report('connected to operator process\n')
+      self.operator_init()
+      self.operator_run()
+      self.operator_final()
+      self.write_signal('%d\n' % signal.finalize) # done
+      self.report('disconnected from operator process\n')
+
+  def run(self):
+    self.phase = phase.run
+    self.report('running\n',color=self.GRAY)
+    # datetime comparison epsilon needs to be less than the completion time of
+    # one loop, so that it doesn't trigger a conditional block again for the
+    # same event and timepoint in the next loop.  It also needs to be longer
+    # than the time it takes to complete all of the conditional blocks, so that
+    # a timepoint conditional is guaranteed to be true for all conditional
+    # blocks in the loop.  We set epsilon to be less than sleep time and ensure
+    # that sleep time - epsilon is longer than the time it takes to complete
+    # every conditional block within the following while loop.
+    #
+    # Each conditional tests whether the current time is within epsilon of a
+    # timepoint, where the timepoints are the divisions of a UTC day by the
+    # supplied timedelta.
+    epsilon = timedelta(seconds=self.disconnected_sleep-1)   # 1 s less than sleep time
+    while (True):
+      now = datetime.utcnow()
+      self.operator_communicate()
+      if is_at_timepoint(now,timedelta(hours=2),epsilon):    # once every 2 hours
+        self.write_command()
+      if is_at_timepoint(now,timedelta(minutes=15),epsilon): # once every 15 minutes
+        self.collect_PTH_datum()
+      else:
+        sleep(self.disconnected_sleep)
+
+  def final(self):
+    self.phase = phase.final
+    self.off_heater() # power off window heater
+    self.off_rain()   # power off rain monitor
+
+  def operator_init(self):
+    self.phase = phase.init
+    self.on_inverter()     # power on inverter
+    self.init_RPC()        # init RPC
+    self.on_radiometer()   # power on radiometer
+    self.init_radiometer() # init radiometer
+    self.on_shutter()      # power on shutter
+
+  def operator_run(self):
+    self.phase = phase.run
+    self.report('collecting data\n',color=self.GRAY)
+    five_minutes = timedelta(seconds=10)
+    now = self.start_time = datetime.utcnow()     # record laser on time
+    self.on_laser()                               # power on laser
+    while (now < self.start_time + five_minutes): # run for 5 m
+      self.collect_PTH_datum() ; sleep(5)         # collect PTH datum every 5 s
+      now = datetime.utcnow()
+    self.off_laser()                              # power off laser
+    self.collect_PTH_datum()                      # collect final PTH datum
+    self.stop_time = datetime.utcnow()            # record laser off time
+    self.report('done collecting\n',color= % self.GRAY)
+
+  def operator_final(self):
+    self.phase = phase.final
+    self.off_shutter()               # close shutter
+    self.read_radiometer_data()      # read radiometer data
+    self.data.append(start=self.start_time,stop=self.stop_time) # collect run times
+    self.write_data()                # write data
+    self.off_radiometer()            # power off radiometer
+    self.off_inverter()              # power off inverter
+    # print all data when verbose
+    self.detail('%s\n' % self.data.radiometer)
+    self.detail('%s\n' % self.data.PTH)
+    self.detail('%s\n' % self.data.times)
+
+class Operator(Control):
+  '''
+  operate 5kmlas system
+
+  The Operator module interfaces with the physical of the system in a scripted
+  manner.  It is a subclass of the Control module, which provides state
+  checking and automatic shut down.  The operator object and daemon object also
+  perform a scripted conversation during the run phase.  This is necessary
+  since the daemon process must be running constantly to monitor and log
+  environment information, and the operator process is initiated by either
+  Middle Drum or as part of a calibration run.
+
+  '''
+
+  def __init__(self,opts):
+    super(Operator,self).__init__(opts) # operator is a control module
+    self.sleep_time = 1                 # time to wait between polling daemon fifos
+    self.signal_from_daemon  = FIFO(side=side.operator,direction=direction.from_daemon) # signal inbound fifo
+    self.signal_to_daemon    = FIFO(side=side.operator,direction=direction.to_daemon)   # signal outbound fifo
+    self.command_from_daemon = FIFO(side=side.operator,direction=direction.from_daemon) # command inbound fifo
+    self.command_to_daemon   = FIFO(side=side.operator,direction=direction.to_daemon)   # command outbound fifo
+
+  def read_signal(self):
+    try:
+      return [int(c) for c in self.signal_from_daemon.read()]
+    except ValueError:
+      return []
+
+  def write_signal(self,data)
+    return self.signal_to_daemon.write(data)
+
+  def read_command(self):
+    return self.data_from_daemon.write()
+
+  def write_command(self,data):
+    return self.command_to_daemon.write(data)
+
+  def daemon_communicate(self):
+    self.write_signal('%d\n' % signal.initialize)
+    while (True):                    # from here on, daemon process is in control
+      signals = self.read_signal()   # poll signals from daemon
+      commands = self.read_command() # poll commands from daemon
+      if signal.error in signals:    # daemon entered error mode
+        self.verbosity = verbosity.verbose
+      exec(commands)                 # daemon passes status and command messages
+      if signal.finalize in signals: # daemon is done
+        break
+      sleep(self.sleep_time)
 
 # main #########################################################################
 
@@ -1134,13 +1162,9 @@ def main():
     daemon.run()
   if opts.mode == 'operate': # operation mode
     operator = Operator(opts)
-    operator.init()
-    operator.run()
-    operator.final()
+    operator.daemon_communicate()
   if opts.mode == 'calibrate': # calibration mode
     calibrator = Operator(opts)
-    calibrator.init()
-    calibrator.run()
-    calibrator.final()
+    calibrator.daemon_communicate()
 
 if __name__ == '__main__' : main()
