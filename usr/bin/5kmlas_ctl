@@ -26,6 +26,8 @@
 #     - laser
 
 import os,sys,re
+from select import select
+from fcntl import fcntl
 from time import sleep
 from datetime import datetime,timedelta
 from optparse import OptionParser,OptionGroup
@@ -34,8 +36,7 @@ from serial import Serial,SerialException,SerialTimeoutException
 class Enum:
   # this idiom is from http://norvig.com/python-iaq.html.  It might be better
   # to use collections.namedtuple, but this datatype wasn't added to python
-  # until 2.6.  I could upgrade debian to squeeze, but I'm loth to stray too
-  # far from Technologic Systems' 'officially' supported debian version
+  # until 2.6 and I would have to upgrade debian to squeeze
   '''
   Create an enumerated type, then add var/value pairs to it.
   The constructor and the method .ints(names) take a list of variable names,
@@ -93,6 +94,7 @@ communication_state = Enum('success error timeout')
 # FIFO IPC
 fifo_dir = Enum('to_daemon from_daemon')
 fifo_side = Enum('daemon operator calibrator')
+#fifo_ready = Enum('reading writing neither')
 signal = Enum('initialize error finalize')
 
 class Data:
@@ -532,75 +534,95 @@ class FIFO:
 
   There should never be more than one Operator class instance (operator or
   calibrator object) at any time.
-
-  All communications from the operator and calibrator objects to the hardware
-  modules pass through the IPC fifos.
   '''
-  def __init__(self,direction=None,side=None,type=None):
+  def __init__(self,direction=None,side=None):
     self.buffer_size = 65536 # = 2**2**2**2
     self.direction = direction
     self.side = side
-    self.type = type
 
     if direction == fifo_dir.to_daemon:
       self.name = '/tmp/5kmlas_to_daemon'
       if side == fifo_side.daemon:
-        os.mkfifo(self.name) # daemon creates to-daemon fifo
-        options = os.O_NDELAY|os.O_RDONLY
+        if os.path.exists(self.name):
+          os.remove(self.name) # delete fifo if it already exists
+        os.mkfifo(self.name)   # daemon creates to-daemon fifo
+        self.options = os.O_NDELAY|os.O_RDONLY
       elif side == fifo_side.operator or side == fifo_side.calibrator:
-        options = os.O_NDELAY|os.O_WRONLY
+        self.options = os.O_NDELAY|os.O_WRONLY
 
     elif direction == fifo_dir.from_daemon:
       self.name = '/tmp/5kmlas_from_daemon'
       if side == fifo_side.daemon:
-        os.mkfifo(self.name) # daemon creates from-daemon fifo
-        options = os.O_NDELAY|os.O_WRONLY
+        self.options = os.O_NDELAY|os.O_WRONLY
       elif side == fifo_side.operator or side == fifo_side.calibrator:
-        options = os.O_NDELAY|os.O_RDONLY
+        if os.path.exists(self.name):
+          os.remove(self.name) # delete fifo if it already exists
+        os.mkfifo(self.name)   # operator creates from-daemon fifo
+        self.options = os.O_NDELAY|os.O_RDONLY
 
     try:
-      if os.path.exists(self.name):
-        print 'b'
-      self.fd = os.open(self.name,options)
+      self.fd = os.open(self.name,self.options)
     except OSError,os_error:
       print 'cannot open FIFO %s: %s' % (self.name,os_error)
       sys.exit(2)
 
-  def __del__(self):
-    try:
-      os.close(self.fd)    # close file descriptor
-    except AttributeError:
-      pass # FIFO wasn't opened if it doesn't have a fd
-    if os.path.exists(self.name):
-      os.remove(self.name) # delete fifo
+#  def ready(self):
+#    '''
+#    use select(2) system call to check whether a fifo is connected on the other
+#    end
+#    '''
+#    status = select([self.fd],[self.fd],[],0) # check if fifo is ready for reading and ready for writing
+#    ready = fifo_ready.neither
+#    try:
+#      # return value of select() is a tuple of the lists of the fd's provided
+#      # to select() that are ready, so we check if self.fd is ready for
+#      # reading
+#      status[0][0]
+#      ready = fifo_ready.reading
+#    except IndexError:
+#      # if self.fd is not ready, its fd was not returned by select()
+#      pass
+#    try:
+#      # check if self.fd is ready for writing
+#      status[1][0]
+#      ready = fifo_ready.writing
+#    except IndexError:
+#      pass
 
   def read(self):
     '''
     return a list of the lines of data read
     '''
     try:
-      data = os.read(self.fd,self.buffer_size)
+      return re.split('\n',os.read(self.fd,self.buffer_size))
     except OSError,os_error:
       if self.side == fifo_side.daemon:
         print 'cannot read from operator or calibrator process: %s' % os_error
       if self.side == fifo_side.operator or self.side == fifo_side.calibrator:
         print 'cannot read from daemon process: %s' % os_error
-      sys.exit(2)
-    return [line for line in data]
+      sys.exit(2) # TODO: capture and handle this error in control module
 
   def write(self,data):
     try:
-      os.write(self.fd,data)
+      return os.write(self.fd,data)
     except OSError,os_error:
       if self.side == fifo_side.daemon:
         print 'cannot write to operator or calibrator process: %s' % os_error
       if self.side == fifo_side.operator or self.side == fifo_side.calibrator:
         print 'cannot write to daemon process: %s' % os_error
-      sys.exit(2)
+      sys.exit(2) # TODO: capture and handle this error in control module
+
+  def close(self):
+    try:
+      os.close(self.fd)    # close file descriptor
+    except AttributeError:
+      pass                 # FIFO wasn't opened if it doesn't have a fd
+
+  __del__ = close
 
 class Control(object):
   '''
-  software control module for 5kmlas apparatus
+  abstract base class for software control modules daemon and operator
 
   The control module is an abstract base class for the daemon and operator
   modules.  Together they wrap each serial communication to the physical
@@ -675,6 +697,21 @@ class Control(object):
     # create list for modules that won't turn off
     self.modules_no_off = []
 
+  def read_fifo(self):
+    signals,commands = [],[]
+    data = self.inbound.read()
+    print data
+    #for line in self.inbound.read():
+    for line in data:
+      try:
+        signals.append(int(line)) # line is a signal
+      except ValueError:
+        commands.append(line)     # line is a python statement
+    return signals,commands
+
+  def write_fifo(self,data):
+    return self.outbound.write(data)
+
   def printf(self,data,color=None): # write to stdout
     if color : data = color + data + self.ENDC
     sys.stdout.write(data)
@@ -684,24 +721,33 @@ class Control(object):
     '''
     write error information to sys.stdout even in quiet mode
     '''
-    self.printf(self,data,color=color)
-    self.write_command("self.printf(self,%s,color=%s)\n" % (data,color))
+    self.printf(data,color=color)
+    try:
+      self.write_fifo("self.printf(%s,color=%s)\n" % (data,color))
+    except AttributeError:
+      pass # there is no outbound fifo
 
   def report(self,data,color=None):
     '''
     write normal-level information to sys.stdout
     '''
     if self.verbosity > verbosity.quiet:
-      self.printf(self,data,color=color)
-    self.write_command("if self.verbosity > verbosity.quiet : self.printf(self,%s,color=%s)\n" % (data,color))
+      self.printf(data,color=color)
+    try:
+      self.write_fifo("if self.verbosity > verbosity.quiet : self.printf('%s',color=%s)\n" % (data,color))
+    except AttributeError:
+      pass # there is no outbound fifo
 
   def detail(self,data,color):
     '''
     write verbose-level information to sys.stdout
     '''
     if self.verbosity == verbosity.verbose:
-      self.printf(self,data,color=color)
-    self.write_command("if self.verbosity == verbosity.verbose : self.printf(self,%s,color=%s)\n" % (data,color))
+      self.printf(data,color=color)
+    try:
+      self.write_fifo("if self.verbosity == verbosity.verbose : self.printf('%s',color=%s)\n" % (data,color))
+    except AttributeError:
+      pass # there is no outbound fifo
 
   # state checks
   def check_init_state(self,module=None):
@@ -781,7 +827,7 @@ class Control(object):
     if module_no_off:
       self.modules_no_off.append(module_no_off)
     self.verbosity = verbosity.verbose
-    self.inform('\nshutting down 5kmlas\n')
+    self.inform('\nshutting down 5kmlas\n',color=self.RED)
     # if laser module exists and isn't the module that won't turn off
     if self.laser and not self.laser in self.modules_no_off:
       if self.laser.power_state == power_state.on:
@@ -935,11 +981,11 @@ class Daemon(Control):
   '''
   5kmlas daemon process
 
-  Like the operator object, the daemon object interacts with the modules in a
-  scripted manner.  Its jobs are to log PTH information and write all data.
-  When no operator object is present (in a second process), the daemon object
-  will log PTH information infrequently.  When there is a second process
-  containing an operator object, it will log PTH information frequently.
+  The daemon object interacts with the modules in a scripted manner.  When no
+  operator object is present (in a second process), the daemon object will log
+  PTH information infrequently.  When there is a second process containing an
+  operator object, it will log PTH information frequently and commence the
+  automated run sequence.
   '''
 
   def __init__(self,opts):
@@ -947,10 +993,7 @@ class Daemon(Control):
     self.disconnected_sleep = 5       # run loop sleep when not connected to an operator process
     self.connected_sleep = 1          # run loop sleep when connected to an operator process
     self.connected = False            # connected to operator
-    self.signal_to_daemon    = FIFO(side=fifo_side.daemon,type=fifo_type.signal,direction=fifo_dir.to_daemon)    # signal inbound fifo
-    self.signal_from_daemon  = FIFO(side=fifo_side.daemon,type=fifo_type.signal,direction=fifo_dir.from_daemon)  # signal outbound fifo
-    self.command_to_daemon   = FIFO(side=fifo_side.daemon,type=fifo_type.command,direction=fifo_dir.to_daemon)   # command inbound fifo
-    self.command_from_daemon = FIFO(side=fifo_side.daemon,type=fifo_type.command,direction=fifo_dir.from_daemon) # command outbound fifo
+    self.inbound = FIFO(side=fifo_side.daemon,direction=fifo_dir.to_daemon) # inbound fifo
 
   def __del__(self):
     self.report('done running\n',color=self.GRAY)
@@ -962,37 +1005,18 @@ class Daemon(Control):
     self-destructing, we will hazard issuing these two commands to the PTH
     board without checking whether they succeed or trigger any errors
     '''
-    try:
-      self.PTH.off(module=self.heater) # power off heater module
-    except:
-      pass
-    try:
-      self.PTH.off(module=self.rain)   # power off rain monitor
-    except:
-      pass
-
-  def read_signal(self):
-    try:
-      return [int(c) for c in self.signal_to_daemon.read()]
-    except ValueError:
-      return []
-
-  def write_signal(self,data):
-    return self.signal_from_daemon.write(data)
-
-  def read_command(self):
-    return self.command_to_daemon.write()
-
-  def write_command(self,data):
-    return self.command_from_daemon.write(data)
+    try : self.PTH.off(module=self.heater) # power off heater module
+    except : pass
+    try : self.PTH.off(module=self.rain)   # power off rain monitor
+    except : pass
 
   def init(self):
     self.phase = phase.init
-    self.init_data()       # init data structure
-    self.init_PTH()        # init PTH board
-    self.on_rain()         # power on rain monitor
-    self.poll_rain()       # check rain state
-    self.on_heater()       # power on window heater
+    #self.init_data()       # init data structure
+    #self.init_PTH()        # init PTH board
+    #self.on_rain()         # power on rain monitor
+    #self.poll_rain()       # check rain state
+    #self.on_heater()       # power on window heater
 
   def run(self):
     self.phase = phase.run
@@ -1014,9 +1038,10 @@ class Daemon(Control):
       now = datetime.utcnow()
       self.operator_communicate()
       if is_at_timepoint(now,timedelta(hours=2),epsilon):    # once every 2 hours
-        self.write_command()
+        self.write_data()
       if is_at_timepoint(now,timedelta(minutes=15),epsilon): # once every 15 minutes
-        self.collect_PTH_datum()
+        pass
+        #self.collect_PTH_datum()
       else:
         sleep(self.disconnected_sleep)
 
@@ -1026,16 +1051,20 @@ class Daemon(Control):
     self.off_rain()   # power off rain monitor
 
   def operator_communicate(self):
-    signals = self.read_signal()            # check IPC from operator process
-    if signal.initializing_fifo in signals: # do operator init
+    signals,commands = self.read_fifo()         # check IPC from operator process
+    if signal.initialize in signals:            # do operator init
+      # operator process will have already created its inbound fifo, so we
+      # connect the other end now
+      self.outbound = FIFO(side=fifo_side.daemon,direction=fifo_dir.from_daemon)
       self.connected = True
       self.report('connected to operator process\n')
       self.operator_init()
       self.operator_run()
       self.operator_final()
-      self.write_signal('%d\n' % signal.finalize) # done
+      self.write_fifo('%d\n' % signal.finalize) # done
       self.report('disconnected from operator process\n')
       self.connected = False
+      self.outbound.close()
 
   def operator_init(self):
     self.phase = phase.init
@@ -1090,37 +1119,20 @@ class Operator(Control):
     super(Operator,self).__init__(opts) # operator is a control module
     self.sleep_time = 1                 # time to wait between polling daemon fifos
     self.connected = False              # connected to daemon
-    self.signal_from_daemon  = FIFO(side=fifo_side.operator,type=fifo_type.signal,direction=fifo_dir.from_daemon)  # signal inbound fifo
-    self.signal_to_daemon    = FIFO(side=fifo_side.operator,type=fifo_type.signal,direction=fifo_dir.to_daemon)    # signal outbound fifo
-    self.command_from_daemon = FIFO(side=fifo_side.operator,type=fifo_type.command,direction=fifo_dir.from_daemon) # command inbound fifo
-    self.command_to_daemon   = FIFO(side=fifo_side.operator,type=fifo_type.command,direction=fifo_dir.to_daemon)   # command outbound fifo
-
-  def read_signal(self):
-    try:
-      return [int(c) for c in self.signal_from_daemon.read()]
-    except ValueError:
-      return []
-
-  def write_signal(self,data):
-    return self.signal_to_daemon.write(data)
-
-  def read_command(self):
-    return self.data_from_daemon.write()
-
-  def write_command(self,data):
-    return self.command_to_daemon.write(data)
+    self.inbound = FIFO(side=fifo_side.operator,direction=fifo_dir.from_daemon) # inbound fifo
+    self.outbound = FIFO(side=fifo_side.operator,direction=fifo_dir.to_daemon) # outbound fifo
 
   def daemon_communicate(self):
-    self.write_signal('%d\n' % signal.initialize)
+    self.write_fifo('%d\n' % signal.initialize)
     self.connected = True
-    while (True):                    # from here on, daemon process is in control
-      signals = self.read_signal()   # poll signals from daemon
-      commands = self.read_command() # poll commands from daemon
-      if signal.error in signals:    # daemon entered error mode
+    while (True):                         # from here on, daemon process is in control
+      signals,commands = self.read_fifo() # read data from daemon
+      if signal.error in signals:         # daemon entered error mode
         self.verbosity = verbosity.verbose
-      exec(commands)                 # daemon passes status and command messages
-      if signal.finalize in signals: # daemon is done
-        break
+      for command in commands:
+        exec(command)                     # daemon sends python statements that will print status messages
+      if signal.finalize in signals:      # daemon is done
+        return                            # quit
       sleep(self.sleep_time)
 
 # main #########################################################################
@@ -1135,9 +1147,6 @@ def parse_opts():
   opt_parser = OptionParser(usage=usage,description=description,version='%prog-0.4',epilog=epilog)
   opt_parser.add_option('-c','--color',action='store_const',const=True,
       default=True,help='print messages in color [default]')
-  # TODO:
-  # - make a 'run' option that is a synonym to 'operate'
-  # - make 'mode' option a positional argument
 
   verbose = OptionGroup(opt_parser,'Verbosity Options',
       'More quiet options take precedent over more verbose options when more than one is supplied.')
@@ -1169,8 +1178,13 @@ def parse_opts():
   if not opts.verbose and not opts.normal and not opts.quiet:
     opts.normal = True
 
+  # handle run mode argument, default mode is operate
   if len(args) == 0:
     args.append('operate')
+  elif len(args) > 1:
+    opt_parser.print_usage()
+    print opt_parser.expand_prog_name('%prog: please specify only one mode.  Use "%prog -h" for help.')
+    sys.exit(1)
   elif len(args) == 1:
     if args[0] == 'daemon' : pass
     elif args[0] == 'operate' : pass
@@ -1191,11 +1205,14 @@ def main():
     daemon.init()
     daemon.run()
     daemon.final()
-  if args[0] == 'operate' or opts.mode == 'run': # operation mode
+    return
+  if args[0] == 'operate' or args[0] == 'run': # operation mode
     operator = Operator(opts)
     operator.daemon_communicate()
+    return
   if args[0] == 'calibrate': # calibration mode
     calibrator = Operator(opts)
     calibrator.daemon_communicate()
+    return
 
 if __name__ == '__main__' : main()
