@@ -594,7 +594,7 @@ class FIFO:
     return a list of the lines of data read
     '''
     try:
-      return re.split('\n',os.read(self.fd,self.buffer_size))
+      return re.split('\0\n',os.read(self.fd,self.buffer_size))
     except OSError,os_error:
       if self.side == fifo_side.daemon:
         print 'cannot read from operator or calibrator process: %s' % os_error
@@ -723,7 +723,7 @@ class Control(object):
     '''
     self.printf(data,color=color)
     try:
-      self.write_fifo("self.printf(%s,color=%s)\n" % (data,color))
+      self.write_fifo('''self.printf(%s,color=%s)\0\n''' % (data,color))
     except AttributeError:
       pass # there is no outbound fifo
 
@@ -734,7 +734,7 @@ class Control(object):
     if self.verbosity > verbosity.quiet:
       self.printf(data,color=color)
     try:
-      self.write_fifo("if self.verbosity > verbosity.quiet : self.printf('%s',color=%s)\n" % (data,color))
+      self.write_fifo('''if self.verbosity > verbosity.quiet : self.printf('%s',color=%s)\0\n''' % (data,color))
     except AttributeError:
       pass # there is no outbound fifo
 
@@ -745,7 +745,7 @@ class Control(object):
     if self.verbosity == verbosity.verbose:
       self.printf(data,color=color)
     try:
-      self.write_fifo("if self.verbosity == verbosity.verbose : self.printf('%s',color=%s)\n" % (data,color))
+      self.write_fifo('''if self.verbosity == verbosity.verbose : self.printf('%s',color=%s)\0\n''' % (data,color))
     except AttributeError:
       pass # there is no outbound fifo
 
@@ -1053,8 +1053,9 @@ class Daemon(Control):
   def operator_communicate(self):
     signals,commands = self.read_fifo()         # check IPC from operator process
     if signal.initialize in signals:            # do operator init
-      # operator process will have already created its inbound fifo, so we
-      # connect the other end now
+      # A fifo must be opened read-only before it can be opened write-only,
+      # so we wait until the operator process opens the read end to open the
+      # write end.
       self.outbound = FIFO(side=fifo_side.daemon,direction=fifo_dir.from_daemon)
       self.connected = True
       self.report('connected to operator process\n')
@@ -1105,9 +1106,9 @@ class Operator(Control):
   '''
   operate 5kmlas system
 
-  The Operator module interfaces with the physical of the system in a scripted
-  manner.  It is a subclass of the Control module, which provides state
-  checking and automatic shut down.  The operator object and daemon object also
+  The Operator module instructs the Daemon module in another process to run the
+  system.  Operator is a subclass of the Control module, which provides state
+  checking and automatic shut down.  The operator object and daemon object
   perform a scripted conversation during the run phase.  This is necessary
   since the daemon process must be running constantly to monitor and log
   environment information, and the operator process is initiated by either
@@ -1157,7 +1158,6 @@ def parse_opts():
   verbose.add_option('-v','--verbose',action='store_const',const=True,
       default=False,help='print data and serial commands and responses, normal messages, and errors')
   opt_parser.add_option_group(verbose)
-
 
   opts,args = opt_parser.parse_args()
 
