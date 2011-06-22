@@ -25,9 +25,7 @@
 #     - shutter
 #     - laser
 
-import os,sys,re
-from select import select
-from fcntl import fcntl
+import os,sys,re,socket
 from time import sleep
 from datetime import datetime,timedelta
 from optparse import OptionParser,OptionGroup
@@ -91,10 +89,8 @@ conf_state = Enum('undefined initialized finalized error')
 rain_state = Enum('dry wet open')
 # serial states
 communication_state = Enum('success error timeout')
-# FIFO IPC
-fifo_dir = Enum('to_daemon from_daemon')
-fifo_side = Enum('daemon operator calibrator')
-#fifo_ready = Enum('reading writing neither')
+# socket IPC
+socket_side = Enum('daemon operator calibrator')
 signal = Enum('initialize error finalize')
 
 class Data:
@@ -507,7 +503,7 @@ def is_at_timepoint(t,d,e):
   '''
   day = timedelta(days=1)
   n = 0 # number of timepoints within a day
-  while (True):
+  while True:
     if n*d >= day:
       break
     n += 1
@@ -526,104 +522,71 @@ def is_at_timepoint(t,d,e):
     if abs(now - timepoint) <= e:
       return True
 
-class FIFO:
-  '''
-  setup posix fifo-based IPC between the daemon process and an operator process
-  or a calibrator process
+class Socket(socket.socket):
+  def __init__(self,side=None):
+    super(Socket,self).__init__(socket.AF_UNIX,socket.SOCK_STREAM)
+    self.buffer_size = 65536            # = 2**2**2**2
+    self.name = '/tmp/5kmlas_socket'
+    self.side = side                    # this Socket instance is on side daemon, operator, or calibrator
+    if self.side == socket_side.daemon: # daemon sets up server side of socket
+      self.remove()                     # remove the socket if it exists
+      self.bind(self.name)              # create and bind to socket
+      self.listen(1)                    # there are only two processes and one socket at a time
+      self.settimeout(0.0)              # do not block when reading the socket
+    elif self.side == socket_side.operator or self.side == socket_side.calibrator:
+      self.connect(self.name)           # operator process connects to the existing socket
 
-  There should never be more than one Operator class instance (operator or
-  calibrator object) at any time.
-  '''
-  def __init__(self,direction=None,side=None):
-    self.buffer_size = 65536   # = 2**2**2**2
-    self.direction = direction
-    self.side = side
+  def __del__(self):
+    self.remove()
+    # socket.socket doesn't have a __del__ method
 
-    if direction == fifo_dir.to_daemon:
-      self.name = '/tmp/5kmlas_to_daemon'
-      if side == fifo_side.daemon:
-        if os.path.exists(self.name):
-          os.remove(self.name) # delete fifo if it already exists
-        print 'making %s fifo' % self.name
-        os.mkfifo(self.name)   # daemon creates to-daemon fifo
-        self.options = os.O_NDELAY|os.O_RDONLY
-      elif side == fifo_side.operator or side == fifo_side.calibrator:
-        self.options = os.O_NDELAY|os.O_WRONLY
+  def remove(self):
+    '''
+    remove unix socket from filesystem
+    '''
+    if self.side == socket_side.daemon:
+      if os.path.lexists(self.name):
+        os.remove(self.name) # only the daemon process removes the socket
 
-    elif direction == fifo_dir.from_daemon:
-      self.name = '/tmp/5kmlas_from_daemon'
-      if side == fifo_side.daemon:
-        self.options = os.O_NDELAY|os.O_WRONLY
-      elif side == fifo_side.operator or side == fifo_side.calibrator:
-        if os.path.exists(self.name):
-          os.remove(self.name) # delete fifo if it already exists
-        os.mkfifo(self.name)   # operator creates from-daemon fifo
-        self.options = os.O_NDELAY|os.O_RDONLY
+  def close(self):
+    if self.side == socket_side.daemon:
+      self.conn.close()          # daemon closes its connection object
+    elif self.side == socket_side.operator or self.side == socket_side.calibrator:
+      super(Socket,self).close() # operator closes itself
 
-    try:
-      self.fd = os.open(self.name,self.options)
-      print self.fd
-    except OSError,os_error:
-      print 'cannot open FIFO %s: %s' % (self.name,os_error)
-      sys.exit(2)
-
-#  def ready(self):
-#    '''
-#    use select(2) system call to check whether a fifo is connected on the other
-#    end
-#    '''
-#    status = select([self.fd],[self.fd],[],0) # check if fifo is ready for reading and ready for writing
-#    ready = fifo_ready.neither
-#    try:
-#      # return value of select() is a tuple of the lists of the fd's provided
-#      # to select() that are ready, so we check if self.fd is ready for
-#      # reading
-#      status[0][0]
-#      ready = fifo_ready.reading
-#    except IndexError:
-#      # if self.fd is not ready, its fd was not returned by select()
-#      pass
-#    try:
-#      # check if self.fd is ready for writing
-#      status[1][0]
-#      ready = fifo_ready.writing
-#    except IndexError:
-#      pass
+  def accept(self):
+    '''
+    daemon object tries to accept a socket connection
+    '''
+    if self.side == socket_side.daemon:
+      try:
+        self.conn,self.addr = super(Socket,self).accept()
+        return True
+      except socket.error:
+        return False
 
   def read(self):
     '''
-    return a list of the lines of data read
+    read from socket
+
+    Unix domain sockets are different from TCP sockets in that one read flushes
+    the whole buffer.  We must ensure that self.buffer_size is large enough to
+    capture any IPC transaction and is smaller than SO_RCVBUF.  64 Kib should
+    be large enough.  See unix(7) and socket(7) for more information.
     '''
-    try:
-      return os.read(self.fd,self.buffer_size)
-    except OSError,os_error:
-      print 'cannot read from FIFO %s: %s' % (self.name,os_error)
-      sys.exit(2) # TODO: capture and handle this error in control module
+    if self.side == socket_side.daemon:
+      return self.conn.recv(self.buffer_size) # daemon reads from connection object
+    elif self.side == socket_side.operator or self.side == socket_side.calibrator:
+      return self.recv(self.buffer_size)      # operator reads from socket object
 
   def write(self,data):
-    try:
-      return os.write(self.fd,data)
-    except OSError,os_error:
-      print 'cannot write to FIFO %s: %s' % (self.name,os_error)
-      sys.exit(2) # TODO: capture and handle this error in control module
-
-  def close(self):
-    try:
-      os.close(self.fd)    # close file descriptor
-    except AttributeError:
-      pass                 # FIFO wasn't opened if it doesn't have an fd
-    # daemon deletes to daemon fifo
-    if self.direction == fifo_dir.to_daemon:
-      if self.side == fifo_side.daemon:
-        if os.path.exists(self.name):
-          os.remove(self.name)
-    # operator deletes from daemon fifo
-    if self.direction == fifo_dir.from_daemon:
-      if self.side == fifo_side.operator or self.side == fifo_side.calibrator:
-        if os.path.exists(self.name):
-          os.remove(self.name)
-
-  __del__ = close
+    '''
+    write data to socket
+    '''
+    if self.side == socket_side.daemon:
+      return self.conn.send(data) # daemon reads from connection object
+    elif self.side == socket_side.operator or self.side == socket_side.calibrator:
+      return self.send(data)      # operator reads from socket object
 
 class Control(object):
   '''
@@ -702,24 +665,34 @@ class Control(object):
     # create list for modules that won't turn off
     self.modules_no_off = []
 
-  def read_fifo(self):
+  def read_socket(self):
     signals,commands = [],[]
-    for line in re.split('\r\n',self.inbound.read())[:-1]: # split inbound data into lines
+    try:
+      data = self.socket.read()
+    except socket.error,error:
+      data = '' # TODO: take appropriate action
+    for line in re.split('\r\n',data)[:-1]:          # split inbound data into lines
       try:
         signals.append(int(line))                    # line is a signal
-      except ValueError:
-        commands.append(re.sub('\\\n','\\\\n',line)) # line is a python statement
+      except ValueError:                             # line is a python statement
+        commands.append(re.sub('\\\n','\\\\n',line)) # escape all NLs in statement
     return signals,commands
 
-  def write_fifo(self,data):
+  def write_socket(self,data):
     '''
-    write data to fifo
+    write data to socket
 
-    FIFO objects expect lines to be terminated with CR-NL.
+    Lines need to be terminated with CR-NL.
     '''
-    return self.outbound.write(data)
+    try:
+      return self.socket.write(data)
+    except socket.error,error:
+      return # TODO: take appropriate action
 
-  def printf(self,data,color=''): # write to stdout
+  def printf(self,data,color=''):
+    '''
+    write to sys.stdout
+    '''
     if color : data = color + data + self.ENDC
     sys.stdout.write(data)
     sys.stdout.flush()
@@ -731,7 +704,7 @@ class Control(object):
     self.printf(data,color=color)
     # the daemon passes its messages on to the operator or calibrator process when it's connected
     if self.connected and isinstance(self,Daemon):
-      self.write_fifo('''self.printf('%s',color='%s')\r\n''' % (data,color))
+      self.write_socket('''self.printf('%s',color='%s')\r\n''' % (data,color))
 
   def report(self,data,color=''):
     '''
@@ -740,7 +713,7 @@ class Control(object):
     if self.verbosity > verbosity.quiet:
       self.printf(data,color=color)
     if self.connected and isinstance(self,Daemon):
-      self.write_fifo('''if self.verbosity > verbosity.quiet : self.printf('%s',color='%s')\r\n''' % (data,color))
+      self.write_socket('''if self.verbosity > verbosity.quiet : self.printf('%s',color='%s')\r\n''' % (data,color))
 
   def detail(self,data,color):
     '''
@@ -749,7 +722,7 @@ class Control(object):
     if self.verbosity == verbosity.verbose:
       self.printf(data,color=color)
     if self.connected and isinstance(self,Daemon):
-      self.write_fifo('''if self.verbosity == verbosity.verbose : self.printf('%s',color='%s')\r\n''' % (data,color))
+      self.write_socket('''if self.verbosity == verbosity.verbose : self.printf('%s',color='%s')\r\n''' % (data,color))
 
   # state checks
   def check_init_state(self,module=None):
@@ -991,18 +964,17 @@ class Daemon(Control):
   '''
 
   def __init__(self,opts):
-    super(Daemon,self).__init__(opts) # daemon is a control module
-    self.disconnected_sleep = 5       # run loop sleep when not connected to an operator process
-    self.connected_sleep = 1          # run loop sleep when connected to an operator process
-    self.connected = False            # connected to operator
-    self.inbound = FIFO(side=fifo_side.daemon,direction=fifo_dir.to_daemon) # inbound fifo
+    super(Daemon,self).__init__(opts)             # daemon is a control module
+    self.sleep_time = 5                           # run loop sleep when not connected to an operator process
+    self.connected = False                        # connected to operator
+    self.socket = Socket(side=socket_side.daemon) # IPC socket
 
   def __del__(self):
+    self.phase = phase.final
     self.report('done running\n',color=self.GRAY)
     if self.connected:
       self.inform('daemon process unexpectedly disconnected\n',color=self.RED)
       self.connected = False
-    self.phase = phase.final
     '''
     since __del__ execution occurs when the python interpreter is
     self-destructing, we will hazard issuing these two commands to the PTH
@@ -1015,11 +987,10 @@ class Daemon(Control):
 
   def init(self):
     self.phase = phase.init
-    #self.init_data()       # init data structure
-    #self.init_PTH()        # init PTH board
-    #self.on_rain()         # power on rain monitor
-    #self.poll_rain()       # check rain state
-    #self.on_heater()       # power on window heater
+    #self.init_data() # init data structure
+    #self.init_PTH()  # init PTH board
+    #self.on_rain()   # power on rain monitor
+    #self.on_heater() # power on window heater
 
   def run(self):
     self.phase = phase.run
@@ -1036,16 +1007,18 @@ class Daemon(Control):
     # Each conditional tests whether the current time is within epsilon of a
     # timepoint, where the timepoints are the divisions of a UTC day by the
     # supplied timedelta.
-    epsilon = timedelta(seconds=self.disconnected_sleep-1)   # 1 s less than sleep time
-    while (True):
+    epsilon = timedelta(seconds=self.sleep_time-1)           # 1 s less than sleep time
+    while True:
       now = datetime.utcnow()
-      self.operator_communicate()
+      if self.socket.accept():                               # once every self.sleep_time seconds
+        self.operator_communicate()
       if is_at_timepoint(now,timedelta(hours=2),epsilon):    # once every 2 hours
         self.write_data()
       if is_at_timepoint(now,timedelta(minutes=15),epsilon): # once every 15 minutes
-        pass #self.collect_PTH_datum()
+        pass
+        #self.collect_PTH_datum()
       else:
-        sleep(self.disconnected_sleep)
+        sleep(self.sleep_time)
 
   def final(self):
     self.phase = phase.final
@@ -1053,24 +1026,14 @@ class Daemon(Control):
     self.off_rain()   # power off rain monitor
 
   def operator_communicate(self):
-    signals,commands = self.read_fifo()           # check IPC from operator process
-    if signal.initialize in signals:              # do operator init
-      self.report('connected to operator process\n')
-      self.connected = True
-      # A fifo must be opened read-only before it can be opened write-only,
-      # so we wait until the operator process opens the read end to open the
-      # write end.
-      self.outbound = FIFO(side=fifo_side.daemon,direction=fifo_dir.from_daemon)
-      self.operator_init()
-      self.operator_run()
-      self.operator_final()
-      self.write_fifo('%d\r\n' % signal.finalize) # done
-      self.outbound.close()
-      self.connected = False
-      self.report('disconnected from operator process\n')
-      self.inbound.close() # inbound fifo needs a new fd if the other end closes
-      self.inbound = FIFO(side=fifo_side.daemon,direction=fifo_dir.to_daemon)
-      print self.inbound
+    self.report('connected to operator process\n')
+    self.connected = True
+    self.operator_init()
+    self.operator_run()
+    self.operator_final()
+    self.write_socket('%d\r\n' % signal.finalize) # done
+    self.connected = False
+    self.report('disconnected from operator process\n')
 
   def operator_init(self):
     self.phase = phase.init
@@ -1113,31 +1076,30 @@ class Operator(Control):
 
   The Operator module instructs the Daemon module in another process to run the
   system.  Operator is a subclass of the Control module, which provides state
-  checking and automatic shut down.  The operator object and daemon object
-  perform a scripted conversation during the run phase.  This is necessary
-  since the daemon process must be running constantly to monitor and log
-  environment information, and the operator process is initiated by either
+  checking and automatic shut down in case of error.  The operator object and
+  daemon object perform a scripted conversation during the run phase.  This is
+  necessary since the daemon process must be running constantly to monitor and
+  log environment information, and the operator process is initiated by either
   Middle Drum or as part of a calibration run.
   '''
 
   def __init__(self,opts):
-    super(Operator,self).__init__(opts) # operator is a control module
-    self.sleep_time = 0.5               # seconds to wait between polling daemon fifo
-    self.connected = False              # connected to daemon
-    self.inbound = FIFO(side=fifo_side.operator,direction=fifo_dir.from_daemon) # inbound fifo
-    self.outbound = FIFO(side=fifo_side.operator,direction=fifo_dir.to_daemon) # outbound fifo
+    super(Operator,self).__init__(opts)             # operator is a control module
+    self.sleep_time = 0.5                           # seconds to wait between polling socket
+    self.connected = False                          # connected to daemon
+    self.socket = Socket(side=socket_side.operator) # IPC socket
 
   def daemon_communicate(self):
-    self.write_fifo('%d\r\n' % signal.initialize)
+    self.write_socket('%d\r\n' % signal.initialize)
     self.connected = True
-    while (True):                         # from here on, daemon process is in control
-      signals,commands = self.read_fifo() # read data from daemon
-      if signal.error in signals:         # daemon entered error mode
+    while True:                             # from here on, daemon process is in control
+      signals,commands = self.read_socket() # read data from daemon
+      if signal.error in signals:           # daemon entered error mode
         self.verbosity = verbosity.verbose
       for command in commands:
-        exec(command)                     # daemon sends python statements that will print status messages
-      if signal.finalize in signals:      # daemon is done
-        return                            # quit
+        exec(command)                       # daemon sends python statements that will print status messages
+      if signal.finalize in signals:        # daemon is done
+        return                              # quit
       sleep(self.sleep_time)
 
 # main #########################################################################
