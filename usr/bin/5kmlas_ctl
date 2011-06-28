@@ -12,6 +12,7 @@
 # - if operator process fails, daemon process ensures modules shut down
 #   gracefully
 # - develop rigorous and thorough hardware failure simulation routine
+# - replace color code with curses color code`
 
 # list of modules:
 # - control
@@ -158,11 +159,6 @@ class SerialModule(Serial):
       self.message = 'failed to write to serial device %s: %s' % (self.name,timeout_exception)
       return
 
-class TestSerial(SerialModule):
-  def __init__(self):
-    self.name = 'test serial module'
-    super(TestSerial,self).__init__(65536,'/dev/tts/0',baudrate=9600,timeout=0.5)
-
 class PowerModule(object):
   '''
   abstract base class for power modules
@@ -277,6 +273,7 @@ class PTH(SerialModule):
     if len(message) != 0:
       module.PTH_message = message
       rain_datum = re.split(r'\s+',module.PTH_message)[:-1]
+      print module.PTH_message,rain_datum
       if rain_datum[1] == 'D': # dry
         module.rain_state = rain_state.dry
         module.message = 'no rain: "%s"' % module.PTH_message
@@ -291,7 +288,7 @@ class Rain(PowerModule):
   '''rain module'''
 
   def __init__(self):
-    self.name = 'rain monitor'               # heater module name
+    self.name = 'rain monitor'               # rain module name
     self.power_state = power_state.undefined # module power state
     self.PTH_switch = 'RMON'                 # PTH board switch name
     self.PTH_on_command = '%s 1' % self.PTH_switch # PTH board on command
@@ -310,7 +307,7 @@ class Heater(PowerModule):
     self.PTH_switch = 'HEAT'                 # PTH board switch name
     self.PTH_on_command = '%s 1' % self.PTH_switch # PTH board on command
     self.PTH_off_command = '%s 0' % self.PTH_switch # PTH board off command
-    self.power_on_sleep = 30                 # time to stabilize after power on
+    self.power_on_sleep = 1 # 30             # time to stabilize after power on
     self.power_off_sleep = 0                 # time to stabilize after power off
     self.PTH_message = ''                    # PTH message
     self.message = ''                        # result message
@@ -534,7 +531,11 @@ class Socket(socket.socket):
       self.listen(1)                    # there are only two processes and one socket at a time
       self.settimeout(0.0)              # do not block when reading the socket
     elif self.side == socket_side.operator or self.side == socket_side.calibrator:
-      self.connect(self.name)           # operator process connects to the existing socket
+      try:
+        self.connect(self.name)           # operator process connects to the existing socket
+      except socket.error,error:
+        print 'cannot connect to %s: %s' % (self.name,error)
+        sys.exit(1)
 
   def __del__(self):
     self.remove()
@@ -587,6 +588,8 @@ class Socket(socket.socket):
       return self.conn.send(data) # daemon reads from connection object
     elif self.side == socket_side.operator or self.side == socket_side.calibrator:
       return self.send(data)      # operator reads from socket object
+
+US = chr(31) # ASCII unit separator is used to separate messages on the socket
 
 class Control(object):
   '''
@@ -670,22 +673,24 @@ class Control(object):
     try:
       data = self.socket.read()
     except socket.error,error:
-      data = '' # TODO: take appropriate action
-    for line in re.split('\r\n',data)[:-1]:          # split inbound data into lines
+      data = ''                               # TODO: take appropriate action
+    for unit in re.split(US,data)[:-1]:       # split inbound data into units
       try:
-        signals.append(int(line))                    # line is a signal
-      except ValueError:                             # line is a python statement
-        commands.append(re.sub('\\\n','\\\\n',line)) # escape all NLs in statement
+        signals.append(int(unit))             # unit is a signal
+      except ValueError:                      # unit is a python statement
+        nunit = re.sub('\\\n','\\\\n',unit)   # escape all NLs in statement
+        rnunit = re.sub('\\\r','\\\\r',nunit) # escape all CRs in statement
+        commands.append(rnunit)
     return signals,commands
 
-  def write_socket(self,data):
+  def write_socket(self,unit):
     '''
     write data to socket
 
-    Lines need to be terminated with CR-NL.
+    Lines are terminated with US character.
     '''
     try:
-      return self.socket.write(data)
+      return self.socket.write('''%s%s''' % (unit,US))
     except socket.error,error:
       return # TODO: take appropriate action
 
@@ -704,7 +709,7 @@ class Control(object):
     self.printf(data,color=color)
     # the daemon passes its messages on to the operator or calibrator process when it's connected
     if self.connected and isinstance(self,Daemon):
-      self.write_socket('''self.printf('%s',color='%s')\r\n''' % (data,color))
+      self.write_socket('''self.printf("""%s""",color="""%s""")''' % (data,color))
 
   def report(self,data,color=''):
     '''
@@ -713,16 +718,16 @@ class Control(object):
     if self.verbosity > verbosity.quiet:
       self.printf(data,color=color)
     if self.connected and isinstance(self,Daemon):
-      self.write_socket('''if self.verbosity > verbosity.quiet : self.printf('%s',color='%s')\r\n''' % (data,color))
+      self.write_socket('''if self.verbosity > verbosity.quiet : self.printf("""%s""",color="""%s""")''' % (data,color))
 
-  def detail(self,data,color):
+  def detail(self,data,color=''):
     '''
     write verbose-level information to sys.stdout
     '''
     if self.verbosity == verbosity.verbose:
       self.printf(data,color=color)
     if self.connected and isinstance(self,Daemon):
-      self.write_socket('''if self.verbosity == verbosity.verbose : self.printf('%s',color='%s')\r\n''' % (data,color))
+      self.write_socket('''if self.verbosity == verbosity.verbose : self.printf("""%s""",color="""%s""")''' % (data,color))
 
   # state checks
   def check_init_state(self,module=None):
@@ -783,7 +788,7 @@ class Control(object):
       self.report('%s\n' % module.message)
       if self.phase != phase.final:
         #self.emergency_shutdown() # TODO: get rain sensor
-        pass
+        self.off_rain()
 
   def check_communication_state(self,module=None):
     if module.communication_state == communication_state.success:
@@ -884,15 +889,15 @@ class Control(object):
 
   def poll_rain(self):
     self.report('checking rain monitor ... ')
-    self.PTH.poll_rain(module=self.rain)    # poll rain state
+    self.PTH.poll_rain(module=self.rain)            # poll rain state
     self.check_communication_state(module=self.PTH) # check write state
-    self.check_rain_state(module=self.rain) # check rain state
+    self.check_rain_state(module=self.rain)         # check rain state
 
   def collect_PTH_datum(self):
     PTH_datum = self.PTH.poll_data()
     self.check_communication_state(module=self.PTH) # check write state
-    self.data.append(PTH_datum=PTH_datum)   # append datum
-    self.detail('%s\n' % PTH_datum) # print PTH datum when verbose
+    self.data.append(PTH_datum=PTH_datum)           # append datum
+    self.detail('%s\n' % PTH_datum)                 # print PTH datum when verbose
     return PTH_datum
 
   # RPC commands
@@ -987,36 +992,37 @@ class Daemon(Control):
 
   def init(self):
     self.phase = phase.init
-    #self.init_data() # init data structure
-    #self.init_PTH()  # init PTH board
-    #self.on_rain()   # power on rain monitor
-    #self.on_heater() # power on window heater
+    self.init_data() # init data structure
+    self.init_PTH()  # init PTH board
+    self.on_rain()   # power on rain monitor
+    self.on_heater() # power on window heater
 
   def run(self):
+    '''
+    datetime comparison epsilon needs to be less than the completion time of
+    one loop, so that it doesn't trigger a conditional block again for the same
+    event and timepoint in the next loop.  It also needs to be longer than the
+    time it takes to complete all of the conditional blocks, so that a
+    timepoint conditional is guaranteed to be true for all conditional blocks
+    in the loop.  We set epsilon to be less than sleep time and ensure that
+    sleep time - epsilon is longer than the time it takes to complete every
+    conditional block within the following while loop.
+    
+    Each conditional tests whether the current time is within epsilon of a
+    timepoint, where the timepoints are the divisions of a UTC day by the
+    supplied timedelta.
+    '''
     self.phase = phase.run
     self.report('running\n',color=self.GRAY)
-    # datetime comparison epsilon needs to be less than the completion time of
-    # one loop, so that it doesn't trigger a conditional block again for the
-    # same event and timepoint in the next loop.  It also needs to be longer
-    # than the time it takes to complete all of the conditional blocks, so that
-    # a timepoint conditional is guaranteed to be true for all conditional
-    # blocks in the loop.  We set epsilon to be less than sleep time and ensure
-    # that sleep time - epsilon is longer than the time it takes to complete
-    # every conditional block within the following while loop.
-    #
-    # Each conditional tests whether the current time is within epsilon of a
-    # timepoint, where the timepoints are the divisions of a UTC day by the
-    # supplied timedelta.
     epsilon = timedelta(seconds=self.sleep_time-1)           # 1 s less than sleep time
     while True:
       now = datetime.utcnow()
-      if self.socket.accept():                               # once every self.sleep_time seconds
+      if self.socket.accept():                               # once every self.sleep_time s
         self.operator_communicate()
-      if is_at_timepoint(now,timedelta(hours=2),epsilon):    # once every 2 hours
+      if is_at_timepoint(now,timedelta(hours=2),epsilon):    # once every 2 h
         self.write_data()
-      if is_at_timepoint(now,timedelta(minutes=15),epsilon): # once every 15 minutes
-        pass
-        #self.collect_PTH_datum()
+      if is_at_timepoint(now,timedelta(minutes=15),epsilon): # once every 15 m
+        self.collect_PTH_datum()
       else:
         sleep(self.sleep_time)
 
@@ -1031,44 +1037,45 @@ class Daemon(Control):
     self.operator_init()
     self.operator_run()
     self.operator_final()
-    self.write_socket('%d\r\n' % signal.finalize) # done
+    self.write_socket('%d' % signal.finalize) # done
     self.connected = False
     self.report('disconnected from operator process\n')
 
   def operator_init(self):
     self.phase = phase.init
-    #self.on_inverter()     # power on inverter
-    #self.init_RPC()        # init RPC
-    #self.on_radiometer()   # power on radiometer
-    #self.init_radiometer() # init radiometer
-    #self.on_shutter()      # power on shutter
+    self.poll_rain()       # check rain state before running
+    self.on_inverter()     # power on inverter
+    self.init_RPC()        # init RPC
+    self.on_radiometer()   # power on radiometer
+    self.init_radiometer() # init radiometer
+    self.on_shutter()      # power on shutter
 
   def operator_run(self):
     self.phase = phase.run
     self.report('collecting data\n',color=self.GRAY)
-    #five_minutes = timedelta(seconds=10)
-    #now = self.start_time = datetime.utcnow()     # record laser on time
-    #self.on_laser()                               # power on laser
-    #while (now < self.start_time + five_minutes): # run for 5 m
-    #  self.collect_PTH_datum() ; sleep(5)         # collect PTH datum every 5 s
-    #  now = datetime.utcnow()
-    #self.off_laser()                              # power off laser
-    #self.collect_PTH_datum()                      # collect final PTH datum
-    #self.stop_time = datetime.utcnow()            # record laser off time
+    five_minutes = timedelta(seconds=10)
+    now = self.start_time = datetime.utcnow()     # record laser on time
+    self.on_laser()                               # power on laser
+    while (now < self.start_time + five_minutes): # run for 5 m
+      self.collect_PTH_datum() ; sleep(5)         # collect PTH datum every 5 s
+      now = datetime.utcnow()                     # new timestamp
+    self.off_laser()                              # power off laser
+    self.collect_PTH_datum()                      # collect final PTH datum
+    self.stop_time = datetime.utcnow()            # record laser off time
     self.report('done collecting\n',color=self.GRAY)
 
   def operator_final(self):
     self.phase = phase.final
-    #self.off_shutter()               # close shutter
-    #self.read_radiometer_data()      # read radiometer data
-    #self.data.append(start=self.start_time,stop=self.stop_time) # collect run times
-    #self.write_data()                # write data
-    #self.off_radiometer()            # power off radiometer
-    #self.off_inverter()              # power off inverter
-    ## print all data when verbose
-    #self.detail('%s\n' % self.data.radiometer)
-    #self.detail('%s\n' % self.data.PTH)
-    #self.detail('%s\n' % self.data.times)
+    self.off_shutter()          # close shutter
+    self.read_radiometer_data() # read radiometer data
+    self.data.append(start=self.start_time,stop=self.stop_time) # collect run times
+    self.write_data()           # write data
+    self.off_radiometer()       # power off radiometer
+    self.off_inverter()         # power off inverter
+    # print all data when verbose
+    self.detail('%s\n' % self.data.radiometer)
+    self.detail('%s\n' % self.data.PTH)
+    self.detail('%s\n' % self.data.times)
 
 class Operator(Control):
   '''
@@ -1090,7 +1097,7 @@ class Operator(Control):
     self.socket = Socket(side=socket_side.operator) # IPC socket
 
   def daemon_communicate(self):
-    self.write_socket('%d\r\n' % signal.initialize)
+    self.write_socket('%d' % signal.initialize)
     self.connected = True
     while True:                             # from here on, daemon process is in control
       signals,commands = self.read_socket() # read data from daemon
@@ -1110,8 +1117,8 @@ def parse_opts():
   '''
   usage = 'Usage: %prog [OPTIONS] MODE'
   description = 'Run 5 km laser calibration system.'
-  epilog = 'MODE is any of "operate" or "run" - Middle Drum operations [default], "calibrate" - calibrate 5kmlas, or "daemon" - run background helper process.'
-  opt_parser = OptionParser(usage=usage,description=description,version='%prog-0.4',epilog=epilog)
+  #epilog = 'MODE is any of "operate" or "run" - Middle Drum operations [default], "calibrate" - calibrate 5kmlas, or "daemon" - run background helper process.'
+  opt_parser = OptionParser(usage=usage,description=description,version='%prog-0.4')#,epilog=epilog)
   opt_parser.add_option('-c','--color',action='store_const',const=True,
       default=True,help='print messages in color [default]')
 
@@ -1178,4 +1185,8 @@ def main():
     calibrator = Operator(opts)
     calibrator.daemon_communicate()
 
-if __name__ == '__main__' : main()
+if __name__ == '__main__':
+  try:
+    main()
+  except KeyboardInterrupt:
+    sys.exit(0)
