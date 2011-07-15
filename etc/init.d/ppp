@@ -1,0 +1,55 @@
+#!/bin/sh
+# /etc/init.d/ppp: this script initialized the pppd process
+# Fri May 27 17:13:30 BRT 2011
+# findlay@cosmic.utah.edu
+
+set -e
+
+test -x /usr/sbin/pppd || exit 0
+
+if test -f /etc/default/ppp; then
+    . /etc/default/ppp
+fi
+
+check_config() {
+    if [ ! -e /etc/ppp/options ]; then
+      echo "Cannot load configuration file: /etc/ppp/options." && exit 1
+    fi
+}
+
+export PATH="${PATH:+$PATH:}/usr/sbin:/sbin"
+
+case "$1" in
+  start)
+	check_config
+	echo -n "Starting Point to Point service: pppd"
+	start-stop-daemon --start --quiet --pidfile /var/run/pppd-5kmlas.pid --exec /usr/sbin/pppd -- $PPPD_OPTS
+        echo "."
+	;;
+  stop)
+	echo -n "Stopping Point to Point service: pppd"
+	start-stop-daemon --stop --quiet --oknodo --pidfile /var/run/pppd-5kmlas.pid
+        echo "."
+	;;
+
+  reload|force-reload)
+	check_config
+        echo -n "Reloading Point to Point configuration"
+	start-stop-daemon --stop --signal 1 --quiet --oknodo --pidfile /var/run/pppd-5kmlas.pid --exec /usr/sbin/pppd
+	echo "."
+	;;
+
+  restart)
+	check_config
+        echo -n "Restarting Point to Point service: pppd"
+	start-stop-daemon --stop --quiet --oknodo --retry 30 --pidfile /var/run/pppd-5kmlas.pid
+	start-stop-daemon --start --quiet --pidfile /var/run/pppd-5kmlas.pid --exec /usr/sbin/pppd -- $PPPD_OPTS
+	echo "."
+	;;
+
+  *)
+	echo "Usage: /etc/init.d/ppp {start|stop|reload|force-reload|restart}"
+	exit 1
+esac
+
+exit 0

@@ -1,0 +1,153 @@
+# /etc/ppp/options
+# 
+# Originally created by Jim Knoble <jmknoble@mercury.interpath.net>
+# Modified for Debian by alvar Bray <alvar@meiko.co.uk>
+# Modified for PPP Server setup by Christoph Lameter <clameter@debian.org>
+#
+
+115200
+
+/dev/ttyAM1
+
+asyncmap 0
+
+noauth
+
+nocrtscts
+
+nocdtrcts
+
+xonxoff
+
+# If you change the linkname you must also modify each occurrence of
+# "/var/run/pppd-${linkname}.pid" in /etc/init.d/ppp
+linkname 5kmlas
+
+local
+
+lock
+
+mru 296
+mtu 296
+
+192.168.0.2:192.168.0.1
+
+netmask 255.255.255.0
+
+passive
+
+silent
+
+# Don't request or allow negotiation of any options for LCP and IPCP
+# (use default values).
+#-all
+
+# Disable Address/Control compression negotiation (use default, i.e.
+# address/control field disabled).
+#-ac
+
+# Disable asyncmap negotiation (use the default asyncmap, i.e. escape
+# all control characters).
+#-am
+
+#-detach
+
+# Disable IP address negotiation (with this option, the remote IP
+# address must be specified with an option on the command line or in
+# an options file).
+#-ip
+
+# Disable protocol field compression negotiation (use default, i.e.
+# protocol field compression disabled).
+#-pc
+
+# Disable negotiation of Van Jacobson style IP header compression (use
+# default, i.e. no compression).
+#-vj
+
+debug
+
+#dump
+
+proxyarp
+
+# If this option is given, pppd will send an LCP echo-request frame to the
+# peer every n seconds. Normally the peer should respond to the echo-request
+# by sending an echo-reply. This option can be used with the
+# lcp-echo-failure option to detect that the peer is no longer connected.
+lcp-echo-interval 30
+
+# If this option is given, pppd will presume the peer to be dead if n
+# LCP echo-requests are sent without receiving a valid LCP echo-reply.
+# If this happens, pppd will terminate the connection.  Use of this
+# option requires a non-zero value for the lcp-echo-interval parameter.
+# This option can be used to enable pppd to terminate after the physical
+# connection has been broken (e.g., the modem has hung up) in
+# situations where no hardware modem control lines are available.
+lcp-echo-failure 4
+
+# Set the LCP restart interval (retransmission timeout) to <n> seconds
+# (default 3).
+#lcp-restart <n>
+
+# Set the maximum number of LCP terminate-request transmissions to <n>
+# (default 3).
+#lcp-max-terminate <n>
+
+# Set the maximum number of LCP configure-request transmissions to <n>
+# (default 10).
+#lcp-max-configure <n>
+
+# Set the maximum number of LCP configure-NAKs returned before starting
+# to send configure-Rejects instead to <n> (default 10).
+#lcp-max-failure <n>
+
+# Set the IPCP restart interval (retransmission timeout) to <n>
+# seconds (default 3).
+#ipcp-restart <n>
+
+# Set the maximum number of IPCP terminate-request transmissions to <n>
+# (default 3).
+#ipcp-max-terminate <n>
+
+# Set the maximum number of IPCP configure-request transmissions to <n>
+# (default 10).
+#ipcp-max-configure <n>
+
+# Set the maximum number of IPCP configure-NAKs returned before starting
+# to send configure-Rejects instead to <n> (default 10).
+#ipcp-max-failure <n>
+
+persist
+
+maxfail 0
+
+# Specifies that pppd should disconnect if the link is idle for <n> seconds.
+# The link is idle when no data packets (i.e. IP packets) are being sent or
+# received.  Note: it is not advisable to use this option with the persist
+# option without the demand option.  If the active-filter option is given,
+# data packets which are rejected by the specified activity filter also
+# count as the link being idle.
+#idle <n>
+
+# Specifies how many seconds to wait before re-initiating the link after
+# it terminates.  This option only has any effect if the persist or demand
+# option is used.  The holdoff period is not applied if the link was
+# terminated because it was idle.
+#holdoff <n>
+
+# Wait for up n milliseconds after the connect script finishes for a valid
+# PPP packet from the peer.  At the end of this time, or when a valid PPP
+# packet is received from the peer, pppd will commence negotiation by
+# sending its first LCP packet.  The default value is 1000 (1 second).
+# This wait period only applies if the connect or pty option is used.
+#connect-delay <n>
+
+# Packet filtering: for more information, see pppd(8)
+# Any packets matching the filter expression will be interpreted as link
+# activity, and will cause a "demand" connection to be activated, and reset
+# the idle connection timer. (idle option)
+# The filter expression is akin to that of tcpdump(1)
+#active-filter <filter-expression>
+
+# ---<End of File>---
