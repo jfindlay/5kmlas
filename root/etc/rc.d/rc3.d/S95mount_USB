@@ -1,0 +1,19 @@
+loadUSBModules.sh
+#loadUSB.sh
+sleep 5
+mount /dev/scsi/host0/bus0/target0/lun0/part1 /mnt/usb
+mount -t proc proc /mnt/usb/proc
+mount -o bind /dev /mnt/usb/dev
+mount -t ramfs -o size=1m randomword /mnt/usb/tmp
+mount -t ramfs -o size=1m randomword /mnt/usb/var/log
+mount -t ramfs -o size=1m randomword /mnt/usb/var/run
+mount -t ramfs -o size=8m randomword /mnt/usb/var/cache/apt
+chroot /mnt/usb modprobe ppp_generic
+chroot /mnt/usb modprobe ppp_async
+chroot /mnt/usb modprobe ppp_deflate
+chroot /mnt/usb modprobe ppp_synctty
+chroot /mnt/usb modprobe pppoe
+chroot /mnt/usb modprobe pppox
+chroot /mnt/usb /etc/init.d/ssh start
+chroot /mnt/usb /etc/init.d/ppp start
+chroot /mnt/usb mkdir -p /var/cache/apt/archives/partial

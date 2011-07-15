@@ -1,0 +1,53 @@
+#
+# inittab       This file describes how the INIT process should set up
+#               the system in a certain run-level.
+#		Please read a standard system's man pages for inittab
+#
+
+# Runlevels. The runlevels used by RedHatSystems are:
+#   0 - halt (DO_NOT set initdefault to this)
+#   1 - Maintaince (single user) mode. 
+#   2 - Multiuser, no networking support 
+#   3 - Full multiuser mode
+#   4 - No standard. Used for weird/special runlevel 
+#   5 - Full multiuser with fbdev text console started
+#   6 - reboot (DO_NOT set initdefault to this)
+# 
+
+# Default Runlevel to Go into
+dflt:3:initdefault:
+
+# System Startup. Do these process before
+# anything else 
+strt::sysinit:/etc/rc.d/rcS.sysinit
+#smpl::sysinit:/path/to/process
+
+# Process to do for each specific Runlevel
+#smpl:4:actionkeyword:/path/to/process arguments
+r0:0:wait:/etc/rc.d/rcS 0
+r1:1:wait:/etc/rc.d/rcS 1
+r2:2:wait:/etc/rc.d/rcS 2
+r3:3:wait:/etc/rc.d/rcS 3
+r4:4:wait:/etc/rc.d/rcS 4
+r5:5:wait:/etc/rc.d/rcS 5
+r6:6:wait:/etc/rc.d/rcS 6
+
+
+# Things to run once specified runlevel is entered
+#ud::once:/sbin/update
+#
+# Start console logins on both COM Ports
+#
+lgn0:12345:respawn:/sbin/getty -L 115200 ttyAM0 
+#lgn1:12345:respawn:/sbin/getty -L 19200 ttyAM1 
+#lgn2:12345:respawn:/sbin/getty -L 115200 ttyTS0 
+
+#
+# Start Virtual Terminal Logins
+#
+vty1:5:respawn:/sbin/getty 38400 vc/0
+###vty2::respawn:/sbin/mingetty vc/2
+
+# Trap CTRL-ALT-DELETE
+ca::ctrlaltdel:/sbin/shutdown -r now
+

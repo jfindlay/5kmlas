@@ -1,0 +1,4 @@
+setserial -v /dev/tts/0 port 0x89c003f8 irq 33 uart 16550A
+setserial -v /dev/tts/1 port 0x89c002f8 irq 40 uart 16550A
+setserial -v /dev/tts/2 port 0x89c003e8 irq 33 uart 16550A
+setserial -v /dev/tts/3 port 0x89c002e8 irq 40 uart 16550A
