@@ -12,7 +12,7 @@
 # - if operator process fails, daemon process ensures modules shut down
 #   gracefully
 # - develop rigorous and thorough hardware failure simulation routine
-# - replace color code with curses color code`
+# - replace color code with curses color code
 
 # list of modules:
 # - control
@@ -31,6 +31,7 @@ from time import sleep
 from datetime import datetime,timedelta
 from optparse import OptionParser,OptionGroup
 from serial import Serial,SerialException,SerialTimeoutException
+import curses.ascii as ascii
 
 class Enum:
   # this idiom is from http://norvig.com/python-iaq.html.  It might be better
@@ -272,8 +273,7 @@ class PTH(SerialModule):
     message = self.read()[:-2] # read rain state and trim final '\r\n'
     if len(message) != 0:
       module.PTH_message = message
-      rain_datum = re.split(r'\s+',module.PTH_message)[:-1]
-      print module.PTH_message,rain_datum
+      rain_datum = re.split(r'\s+',module.PTH_message)
       if rain_datum[1] == 'D': # dry
         module.rain_state = rain_state.dry
         module.message = 'no rain: "%s"' % module.PTH_message
@@ -589,8 +589,6 @@ class Socket(socket.socket):
     elif self.side == socket_side.operator or self.side == socket_side.calibrator:
       return self.send(data)      # operator reads from socket object
 
-US = chr(31) # ASCII unit separator is used to separate messages on the socket
-
 class Control(object):
   '''
   abstract base class for software control modules daemon and operator
@@ -674,12 +672,12 @@ class Control(object):
       data = self.socket.read()
     except socket.error,error:
       data = ''                               # TODO: take appropriate action
-    for unit in re.split(US,data)[:-1]:       # split inbound data into units
+    for unit in re.split(ascii.US,data)[:-1]: # split inbound data into units
       try:
         signals.append(int(unit))             # unit is a signal
       except ValueError:                      # unit is a python statement
-        nunit = re.sub('\\\n','\\\\n',unit)   # escape all NLs in statement
-        rnunit = re.sub('\\\r','\\\\r',nunit) # escape all CRs in statement
+        nunit = re.sub(r'\n',r'\\n',unit)   # escape all NLs in statement
+        rnunit = re.sub(r'\r',r'\\r',nunit) # escape all CRs in statement
         commands.append(rnunit)
     return signals,commands
 
@@ -690,7 +688,7 @@ class Control(object):
     Lines are terminated with US character.
     '''
     try:
-      return self.socket.write('''%s%s''' % (unit,US))
+      return self.socket.write('''%s%s''' % (unit,ascii.US))
     except socket.error,error:
       return # TODO: take appropriate action
 
