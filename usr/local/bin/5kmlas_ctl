@@ -17,6 +17,7 @@
 # list of modules:
 # - control
 #   * data
+#   * charge controller
 #   * PTH
 #     - rain
 #     - heater
@@ -25,13 +26,22 @@
 #     - radiometer
 #     - shutter
 #     - laser
+# modules which are always powered on, or in constant use:
+#   SBC, PTH, radio, antenna, charge controller, batteries, solar panels
+# modules powered on by SBC controlling program:
+#   rain sensor, heater, inverter, RPC, radiometer, shutter, laser
 
 import os,sys,re,socket
 from time import sleep
 from datetime import datetime,timedelta
 from optparse import OptionParser,OptionGroup
 from serial import Serial,SerialException,SerialTimeoutException
-import curses.ascii as ascii
+from ctypes import CDLL
+from ctypes import byref
+from ctypes import c_int,c_char,c_char_p
+from curses.ascii import US as US_chr
+
+US = chr(US_chr) # unit separator
 
 class Enum:
   # this idiom is from http://norvig.com/python-iaq.html.  It might be better
@@ -98,6 +108,7 @@ signal = Enum('initialize error finalize')
 class Data:
   def __init__(self):
     self.radiometer = []
+    self.charge_controller = []
     self.PTH = []
     zero_time = datetime.utcfromtimestamp(0)
     self.times = {'start':zero_time,'stop':zero_time}
@@ -105,6 +116,8 @@ class Data:
   def append(self,*args,**kwargs):
     if 'radiometer_datum' in kwargs:
       self.radiometer.append(kwargs['radiometer_datum'])
+    if 'charge_controller_datum' in kwargs:
+      self.charge_controller.append(kwargs['charge_controller_datum'])
     if 'PTH_datum' in kwargs:
       self.PTH.append(kwargs['PTH_datum'])
     if 'start' in kwargs:
@@ -141,7 +154,7 @@ class SerialModule(Serial):
   def read(self):
     try:
       self.communication_state = communication_state.success
-      return super(SerialModule,self).read(self.buffer_size)
+      return super(SerialModule,self).read(self.buffer_size).strip()
     except SerialException,serial_exception:
       self.communication_state = communication_state.error
       self.message = 'failed to read from serial device %s: %s' % (self.name,serial_exception)
@@ -160,6 +173,10 @@ class SerialModule(Serial):
       self.message = 'failed to write to serial device %s: %s' % (self.name,timeout_exception)
       return
 
+class ModbusModule(SerialModule):
+  def __init__(self,*args,**kwargs):
+    super(ModbusModule,self).__init__(*args,**kwargs)
+
 class PowerModule(object):
   '''
   abstract base class for power modules
@@ -169,6 +186,30 @@ class PowerModule(object):
     pass
 
 # module classes ###############################################################
+
+class ChargeController(ModbusModule):
+  def __init__(self):
+    self.buffer_size = 65536        # = 2**2**2**2 : termios read buffer size
+    self.name = 'charge controller' # charge controller module name
+    self.conf_message = ''          # state message
+    self.message = ''               # result message
+    self.communication_state = communication_state.success
+    super(ChargeController,self).__init__(self.buffer_size,'/dev/tts/0',baudrate=9600,timeout=0.5)
+    self.check_conf_state()
+
+  def check_conf_state(self):
+    self.conf_state = conf_state.initialized    # module conf state
+
+  def trying(self):
+    self.libmodbus = CDLL('/usr/local/lib/libmodbus.so') # use ctypes to load libmodbus.so C library
+    self.rtu = self.libmodbus.modbus_t
+    self.rtu = self.libmodbus.modbus_new_rtu(c_char_p('/dev/tts/3'),c_int(9600),c_char('N'),c_int(8),c_int(2)) # setup modbus serial interface
+    print self.libmodbus.modbus_connect(byref(self.rtu))
+    print self.rtu
+#    self.libmodbus.modbus_connect(self.rtu) # connect to charge controller
+
+  def poll_data(self):
+    pass
 
 class PTH(SerialModule):
   '''
@@ -206,7 +247,7 @@ class PTH(SerialModule):
 
   def check_conf_state(self):
     self.write('VER\r\n')                         # check PTH initialized
-    self.conf_message = self.read()[:-2]          # strip final '\r\n' characters from state message
+    self.conf_message = self.read()               # read state message
     if re.search(r'VER\s+\S+',self.conf_message): # parse version message
       self.conf_state = conf_state.initialized    # module conf state
       self.message = 'PTH version: "%s"' % self.conf_message
@@ -217,7 +258,7 @@ class PTH(SerialModule):
 
   def on(self,module=None): # close a PTH switch
     self.write('%s\r\n' % module.PTH_on_command) # close PTH switch for module
-    module.PTH_message = self.read()[:-2]        # capture PTH message and strip final '\r\n'
+    module.PTH_message = self.read()             # capture PTH message
     self.check_switch_state(module=module)       # check module power on
     if module.power_state == power_state.on:     # if module powered on
       sleep(module.power_on_sleep)               # wait for module to stabilize
@@ -230,7 +271,7 @@ class PTH(SerialModule):
 
   def off(self,module=None): # open a PTH switch
     self.write('%s\r\n' % module.PTH_off_command) # open PTH switch for module
-    module.PTH_message = self.read()[:-2]         # capture PTH message and strip final '\r\n'
+    module.PTH_message = self.read()              # capture PTH message
     self.check_switch_state(module=module)        # check module power off
     if module.power_state == power_state.off:     # if module powered off
       sleep(module.power_off_sleep)               # wait for module to stabilize
@@ -260,7 +301,7 @@ class PTH(SerialModule):
     for measure in press,temp,humid,supply:
       if len(measure) != 0:
         # typical datum = ['PRESS','867.3']
-        datum = re.split(r'\s+',measure)[:-1]
+        datum = re.split(r'\s+',measure.strip())
         if measure == rain:
           data_dict[rain_datum[0]] = rain_datum[1]
         else:
@@ -270,7 +311,7 @@ class PTH(SerialModule):
   def poll_rain(self,module=None):
     self.read() # clear output buffer
     self.write('RAIN\r\n')
-    message = self.read()[:-2] # read rain state and trim final '\r\n'
+    message = self.read()      # read rain state
     if len(message) != 0:
       module.PTH_message = message
       rain_datum = re.split(r'\s+',module.PTH_message)
@@ -445,9 +486,9 @@ class Radiometer(SerialModule,PowerModule):
     self.write('AD\r')      # ASCII dump
 
   def check_conf_state(self):
-    self.write('ST\r')               # check error status
-    self.conf_message = self.read()[:-1] # strip final '\r' characters from state message
-    if re.search(r'0',self.message): # if no errors
+    self.write('ST\r')                      # check error status
+    self.conf_message = self.read().strip() # strip leading,trailing whitespace
+    if re.search(r'0',self.message):        # if no errors
       self.conf_state = conf_state.initialized
       self.message = 'radiometer returned error status "0", no error'
     else: # TODO: try to figure out how to get radiometer into 0 (no) error state
@@ -532,7 +573,7 @@ class Socket(socket.socket):
       self.settimeout(0.0)              # do not block when reading the socket
     elif self.side == socket_side.operator or self.side == socket_side.calibrator:
       try:
-        self.connect(self.name)           # operator process connects to the existing socket
+        self.connect(self.name)         # operator process connects to the existing socket
       except socket.error,error:
         print 'cannot connect to %s: %s' % (self.name,error)
         sys.exit(1)
@@ -576,9 +617,10 @@ class Socket(socket.socket):
     be large enough.  See unix(7) and socket(7) for more information.
     '''
     if self.side == socket_side.daemon:
-      return self.conn.recv(self.buffer_size) # daemon reads from connection object
+      data = self.conn.recv(self.buffer_size) # daemon reads from connection object
     elif self.side == socket_side.operator or self.side == socket_side.calibrator:
-      return self.recv(self.buffer_size)      # operator reads from socket object
+      data = self.recv(self.buffer_size)      # operator reads from socket object
+    return data.strip()                       # remove extra whitespace
 
   def write(self,data):
     '''
@@ -671,11 +713,11 @@ class Control(object):
     try:
       data = self.socket.read()
     except socket.error,error:
-      data = ''                               # TODO: take appropriate action
-    for unit in re.split(ascii.US,data)[:-1]: # split inbound data into units
+      data = ''                             # TODO: take appropriate action
+    for unit in re.split(US,data):          # split inbound data into units
       try:
-        signals.append(int(unit))             # unit is a signal
-      except ValueError:                      # unit is a python statement
+        signals.append(int(unit))           # unit is a signal
+      except ValueError:                    # unit is a python statement
         nunit = re.sub(r'\n',r'\\n',unit)   # escape all NLs in statement
         rnunit = re.sub(r'\r',r'\\r',nunit) # escape all CRs in statement
         commands.append(rnunit)
@@ -688,7 +730,7 @@ class Control(object):
     Lines are terminated with US character.
     '''
     try:
-      return self.socket.write('''%s%s''' % (unit,ascii.US))
+      return self.socket.write('''%s%s''' % (unit,US))
     except socket.error,error:
       return # TODO: take appropriate action
 
@@ -839,6 +881,16 @@ class Control(object):
     self.data.write() # format and save data, then clear data buffer
     self.report('done\n',color=self.GREEN)
 
+  # charge controller commands
+  def init_charge_controller(self):
+    self.report('initializing charge controller modbus interface ... ')
+    self.charge_controller = ChargeController() # init charge controller
+    self.check_communication_state(module=self.charge_controller) # check write state
+    self.check_init_state(module=self.charge_controller) # check charge controller init state
+
+  def collect_charge_controller_datum(self):
+    charge_controller_datum = self.charge_controller.poll_data()
+
   # PTH commands
   def init_PTH(self):
     self.report('initializing PTH board ... ')
@@ -968,7 +1020,7 @@ class Daemon(Control):
 
   def __init__(self,opts):
     super(Daemon,self).__init__(opts)             # daemon is a control module
-    self.sleep_time = 5                           # run loop sleep when not connected to an operator process
+    self.sleep_time = 5                           # run loop sleep
     self.connected = False                        # connected to operator
     self.socket = Socket(side=socket_side.daemon) # IPC socket
 
@@ -980,8 +1032,8 @@ class Daemon(Control):
       self.connected = False
     '''
     since __del__ execution occurs when the python interpreter is
-    self-destructing, we will hazard issuing these two commands to the PTH
-    board without checking whether they succeed or trigger any errors
+    self-destructing, we will hazard issuing these commands to the PTH board
+    without checking whether they succeed or trigger any errors
     '''
     try : self.PTH.off(module=self.heater) # power off heater module
     except : pass
@@ -990,10 +1042,12 @@ class Daemon(Control):
 
   def init(self):
     self.phase = phase.init
-    self.init_data() # init data structure
-    self.init_PTH()  # init PTH board
-    self.on_rain()   # power on rain monitor
-    self.on_heater() # power on window heater
+    self.init_data()              # init data structure
+    self.init_charge_controller() # init charge controller
+    self.init_PTH()               # init PTH board
+    self.on_rain()                # power on rain monitor
+    self.poll_rain()              # check rain state
+    self.on_heater()              # power on window heater
 
   def run(self):
     '''
@@ -1020,6 +1074,7 @@ class Daemon(Control):
       if is_at_timepoint(now,timedelta(hours=2),epsilon):    # once every 2 h
         self.write_data()
       if is_at_timepoint(now,timedelta(minutes=15),epsilon): # once every 15 m
+        self.collect_charge_controller_datum()
         self.collect_PTH_datum()
       else:
         sleep(self.sleep_time)
@@ -1030,14 +1085,16 @@ class Daemon(Control):
     self.off_rain()   # power off rain monitor
 
   def operator_communicate(self):
-    self.report('connected to operator process\n')
-    self.connected = True
-    self.operator_init()
-    self.operator_run()
-    self.operator_final()
-    self.write_socket('%d' % signal.finalize) # done
-    self.connected = False
-    self.report('disconnected from operator process\n')
+    signals,commands = self.read_socket() # read data from operator
+    if signal.initialize in signals:      # operator is requesting to enter run mode
+      self.report('connected to operator process\n')
+      self.connected = True
+      self.operator_init()
+      self.operator_run()
+      self.operator_final()
+      self.write_socket('%d' % signal.finalize) # done
+      self.connected = False
+      self.report('disconnected from operator process\n')
 
   def operator_init(self):
     self.phase = phase.init
@@ -1055,9 +1112,12 @@ class Daemon(Control):
     now = self.start_time = datetime.utcnow()     # record laser on time
     self.on_laser()                               # power on laser
     while (now < self.start_time + five_minutes): # run for 5 m
-      self.collect_PTH_datum() ; sleep(5)         # collect PTH datum every 5 s
+      self.collect_charge_controller_datum()
+      self.collect_PTH_datum()
+      sleep(5)                                    # collect charge controller,PTH data every 5 s
       now = datetime.utcnow()                     # new timestamp
     self.off_laser()                              # power off laser
+    self.collect_charge_controller_datum()        # collect final charge controller datum
     self.collect_PTH_datum()                      # collect final PTH datum
     self.stop_time = datetime.utcnow()            # record laser off time
     self.report('done collecting\n',color=self.GRAY)
@@ -1072,6 +1132,7 @@ class Daemon(Control):
     self.off_inverter()         # power off inverter
     # print all data when verbose
     self.detail('%s\n' % self.data.radiometer)
+    self.detail('%s\n' % self.data.charge_controller)
     self.detail('%s\n' % self.data.PTH)
     self.detail('%s\n' % self.data.times)
 
@@ -1095,6 +1156,8 @@ class Operator(Control):
     self.socket = Socket(side=socket_side.operator) # IPC socket
 
   def daemon_communicate(self):
+    self.init_charge_controller()
+    self.charge_controller.trying() ; sys.exit()
     self.write_socket('%d' % signal.initialize)
     self.connected = True
     while True:                             # from here on, daemon process is in control
@@ -1114,9 +1177,8 @@ def parse_opts():
   handle invocation options and arguments
   '''
   usage = 'Usage: %prog [OPTIONS] MODE'
-  description = 'Run 5 km laser calibration system.'
-  #epilog = 'MODE is any of "operate" or "run" - Middle Drum operations [default], "calibrate" - calibrate 5kmlas, or "daemon" - run background helper process.'
-  opt_parser = OptionParser(usage=usage,description=description,version='%prog-0.4')#,epilog=epilog)
+  description = 'Run 5 km laser calibration system.\nMODE is any of "operate" or "run" - Middle Drum operations [default], "calibrate" - calibrate 5kmlas, or "daemon" - run background helper process.'
+  opt_parser = OptionParser(usage=usage,description=description,version='%prog-0.4')
   opt_parser.add_option('-c','--color',action='store_const',const=True,
       default=True,help='print messages in color [default]')
 

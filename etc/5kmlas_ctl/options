@@ -3,7 +3,9 @@
 # jfindlay@cosmic.utah.edu
 
 # run in daemon mode
---mode=daemon
+FKMLAS_CTL_OPTS="daemon"
 
 # no output except errors
---quiet
+FKMLAS_CTL_OPTS+=" --quiet"
+
+export FKMLAS_CTL_OPTS
