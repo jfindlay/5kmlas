@@ -9,10 +9,9 @@
 #   transferred to Middle Drum, where it will be pooled into the regular data
 #   collection and processing streams as already implemented in Middle Drum
 #   operations.
-# - if operator process fails, daemon process ensures modules shut down
-#   gracefully
 # - develop rigorous and thorough hardware failure simulation routine
 # - replace color code with curses color code
+# - replace custom logging with python logging module
 
 # list of modules:
 # - control
@@ -36,9 +35,7 @@ from time import sleep
 from datetime import datetime,timedelta
 from optparse import OptionParser,OptionGroup
 from serial import Serial,SerialException,SerialTimeoutException
-from ctypes import CDLL
-from ctypes import byref
-from ctypes import c_int,c_char,c_char_p
+from pymodbus.client.sync import ModbusSerialClient as ModbusClient
 from curses.ascii import US as US_chr
 
 US = chr(US_chr) # unit separator
@@ -195,18 +192,18 @@ class ChargeController(ModbusModule):
     self.message = ''               # result message
     self.communication_state = communication_state.success
     super(ChargeController,self).__init__(self.buffer_size,'/dev/tts/0',baudrate=9600,timeout=0.5)
-    self.check_conf_state()
+    self.set_conf_state()
 
-  def check_conf_state(self):
+  def set_conf_state(self):
     self.conf_state = conf_state.initialized    # module conf state
 
   def trying(self):
-    self.libmodbus = CDLL('/usr/local/lib/libmodbus.so') # use ctypes to load libmodbus.so C library
-    self.rtu = self.libmodbus.modbus_t
-    self.rtu = self.libmodbus.modbus_new_rtu(c_char_p('/dev/tts/3'),c_int(9600),c_char('N'),c_int(8),c_int(2)) # setup modbus serial interface
-    print self.libmodbus.modbus_connect(byref(self.rtu))
-    print self.rtu
-#    self.libmodbus.modbus_connect(self.rtu) # connect to charge controller
+    import logging
+    logging.basicConfig()
+    log = logging.getLogger()
+    log.setLevel(logging.DEBUG)
+    self.modbus_client = ModbusClient(method='rtu',port='/dev/tts/3',baudrate=9600,bytesize=8,parity='N',stopbits=2)
+    print self.modbus_client.read_input_registers(0x008,1,unit=0x01).registers[0]*100.*2**-15
 
   def poll_data(self):
     pass
@@ -243,9 +240,9 @@ class PTH(SerialModule):
     super(PTH,self).__init__(self.buffer_size,'/dev/tts/0',baudrate=9600,timeout=0.5)
     self.write('ECHO 0\r\n') # disable PTH-side serial echo
     self.read()              # clear output buffer
-    self.check_conf_state()
+    self.set_conf_state()
 
-  def check_conf_state(self):
+  def set_conf_state(self):
     self.write('VER\r\n')                         # check PTH initialized
     self.conf_message = self.read()               # read state message
     if re.search(r'VER\s+\S+',self.conf_message): # parse version message
@@ -391,9 +388,9 @@ class RPC(SerialModule):
     self.conf_message = ''   # state message
     self.message = ''        # result message
     super(RPC,self).__init__(self.buffer_size,'/dev/tts/1',baudrate=9600,timeout=1)
-    self.check_conf_state()
+    self.set_conf_state()
 
-  def check_conf_state(self):
+  def set_conf_state(self):
     self.conf_message = self.read()             # init message
     if re.search(r'BayTech',self.conf_message): # parse message for 'BayTech' string
       self.conf_state = conf_state.initialized  # module conf state
@@ -408,7 +405,7 @@ class RPC(SerialModule):
     self.write('ON %d\r\n' % module.RPC_outlet)# power on RPC outlet for module
     sleep(0.5) ; self.write('Y\r\n')           # wait 0.5 s and confirm power on
     module.RPC_message = self.read()           # capture RPC message
-    self.check_power_state(module=module)      # check powered on
+    self.set_power_state(module=module)      # check powered on
     if module.power_state == power_state.on:   # if module powered on
       sleep(module.power_on_sleep)             # wait for module to stabilize
       module.message = '%s is on RPC outlet %s' % (module.name,module.RPC_outlet)
@@ -422,7 +419,7 @@ class RPC(SerialModule):
     self.write('OFF %d\r\n' % module.RPC_outlet) # power off RPC outlet for module
     sleep(0.5) ; self.write('Y\r\n')             # wait 0.5 s and confirm power off
     module.RPC_message = self.read()             # capture RPC message
-    self.check_power_state(module=module)        # check powered off
+    self.set_power_state(module=module)        # check powered off
     if module.power_state == power_state.off:    # if module powered off
       sleep(module.power_off_sleep)              # wait for module to stabilize
       module.message = '%s is on RPC outlet %s' % (module.name,module.RPC_outlet)
@@ -432,7 +429,7 @@ class RPC(SerialModule):
       module.message += '\nRPC message:\n"%s"\n' % module.RPC_message
       module.message += '\nRPC message should contain: "%d)...Outlet %d  : On"' % (module.RPC_outlet,module.RPC_outlet)
 
-  def check_power_state(self,module=None):
+  def set_power_state(self,module=None):
     if re.search(r'^.*Outlet\s+%d\s+:\s+On.*$' % module.RPC_outlet,module.RPC_message,re.M):
       module.power_state = power_state.on
     elif re.search(r'^.*Outlet\s+%d\s+:\s+Off.*$' % module.RPC_outlet,module.RPC_message,re.M):
@@ -482,10 +479,10 @@ class Radiometer(SerialModule,PowerModule):
     #self.flushInput()
     #self.flushOutput()     # doesn't work when run from SBC
     self.read()             # clear output buffer
-    self.check_conf_state()
+    self.set_conf_state()
     self.write('AD\r')      # ASCII dump
 
-  def check_conf_state(self):
+  def set_conf_state(self):
     self.write('ST\r')                      # check error status
     self.conf_message = self.read().strip() # strip leading,trailing whitespace
     if re.search(r'0',self.message):        # if no errors
@@ -770,8 +767,8 @@ class Control(object):
       self.write_socket('''if self.verbosity == verbosity.verbose : self.printf("""%s""",color="""%s""")''' % (data,color))
 
   # state checks
-  def check_init_state(self,module=None):
-    if module.conf_state == conf_state.initialized:
+  def check_conf_state(self,desired_state,module=None):
+    if module.conf_state == desired_state:
       self.report('done\n',color=self.GREEN)
       self.detail('%s\n' % module.message)
     elif module.conf_state == conf_state.undefined or module.conf_state == conf_state.finalized:
@@ -783,33 +780,11 @@ class Control(object):
       self.inform('%s\n' % module.message)
       self.emergency_shutdown()
 
-  def check_final_state(self,module=None):
-    if module.conf_state == conf_state.finalized:
+  def check_power_state(self,desired_state,module=None):
+    if module.power_state == desired_state:
       self.report('done\n',color=self.GREEN)
       self.detail('%s\n' % module.message)
-    elif module.conf_state == conf_state.undefined or module.conf_state == conf_state.initialized:
-      self.inform('failed\n',color=self.RED)
-      self.inform('%s\n' % module.message)
-      self.emergency_shutdown(module_no_off=module)
-    elif module.conf_state == conf_state.error:
-      self.inform('error\n',color=self.RED)
-      self.inform('%s\n' % module.message)
-      self.emergency_shutdown(module_no_off=module)
-
-  def check_on_state(self,module=None):
-    if module.power_state == power_state.on:
-      self.report('done\n',color=self.GREEN)
-      self.detail('%s\n' % module.message)
-    elif module.power_state == power_state.undefined or module.power_state == power_state.off:
-      self.inform('failed\n',color=self.RED)
-      self.inform('%s\n' % module.message)
-      self.emergency_shutdown()
-
-  def check_off_state(self,module=None):
-    if module.power_state == power_state.off:
-      self.report('done\n',color=self.GREEN)
-      self.detail('%s\n' % module.message)
-    elif module.power_state == power_state.undefined or module.power_state == power_state.on:
+    else:
       self.inform('failed\n',color=self.RED)
       self.inform('%s\n' % module.message)
       self.emergency_shutdown(module_no_off=module)
@@ -832,7 +807,7 @@ class Control(object):
 
   def check_communication_state(self,module=None):
     if module.communication_state == communication_state.success:
-      pass # serial module successfully written to or read from
+      return # serial module successfully written to or read from
     elif module.communication_state == communication_state.error:
       self.emergency_shutdown()
     elif module.communication_state == communication_state.timeout:
@@ -886,7 +861,7 @@ class Control(object):
     self.report('initializing charge controller modbus interface ... ')
     self.charge_controller = ChargeController() # init charge controller
     self.check_communication_state(module=self.charge_controller) # check write state
-    self.check_init_state(module=self.charge_controller) # check charge controller init state
+    self.check_conf_state(conf_state.initialized,module=self.charge_controller) # check charge controller init state
 
   def collect_charge_controller_datum(self):
     charge_controller_datum = self.charge_controller.poll_data()
@@ -896,46 +871,46 @@ class Control(object):
     self.report('initializing PTH board ... ')
     self.PTH = PTH()                        # init PTH board
     self.check_communication_state(module=self.PTH) # check write state
-    self.check_init_state(module=self.PTH)  # check PTH init state
+    self.check_conf_state(conf_state.initialized,module=self.PTH)  # check PTH init state
 
   def on_rain(self):
     self.report('powering on rain monitor ... ')
     self.rain = Rain()
     self.PTH.on(module=self.rain)           # power on rain monitor module
     self.check_communication_state(module=self.PTH) # check write state
-    self.check_on_state(module=self.rain)   # check rain monitor power state
+    self.check_power_state(power_state.on,module=self.rain)   # check rain monitor power state
 
   def off_rain(self):
     self.report('powering off rain monitor ... ')
     self.PTH.off(module=self.rain)          # power off rain monitor module
     self.check_communication_state(module=self.PTH) # check write state
-    self.check_off_state(module=self.rain)  # check rain monitor init state
+    self.check_power_state(power_state.off,module=self.rain)  # check rain monitor init state
 
   def on_heater(self):
     self.report('powering on heater ... ')
     self.heater = Heater()                  # create object for heater module
     self.PTH.on(module=self.heater)         # power on heater module
     self.check_communication_state(module=self.PTH) # check write state
-    self.check_on_state(module=self.heater) # check heater power state
+    self.check_power_state(power_state.on,module=self.heater) # check heater power state
 
   def off_heater(self):
     self.report('powering off heater ... ')
     self.PTH.off(module=self.heater)         # power off heater module
     self.check_communication_state(module=self.PTH)  # check write state
-    self.check_off_state(module=self.heater) # check heater power state
+    self.check_power_state(power_state.off,module=self.heater) # check heater power state
 
   def on_inverter(self):
     self.report('powering on inverter ... ')
     self.inverter = Inverter()                # create object for inverter module
     self.PTH.on(module=self.inverter)         # power on inverter module
     self.check_communication_state(module=self.PTH)   # check write state
-    self.check_on_state(module=self.inverter) # check inverter power state
+    self.check_power_state(power_state.on,module=self.inverter) # check inverter power state
 
   def off_inverter(self):
     self.report('powering off inverter ... ')
     self.PTH.off(module=self.inverter)         # power off inverter module
     self.check_communication_state(module=self.PTH)    # check write state
-    self.check_off_state(module=self.inverter) # check inverter power state
+    self.check_power_state(power_state.off,module=self.inverter) # check inverter power state
 
   def poll_rain(self):
     self.report('checking rain monitor ... ')
@@ -954,53 +929,53 @@ class Control(object):
   def init_RPC(self):
     self.report('initializing RPC module ... ')
     self.RPC = RPC()                        # init RPC module
-    self.check_init_state(module=self.RPC)  # check RPC init state
+    self.check_conf_state(conf_state.initialized,module=self.RPC)  # check RPC init state
 
   def on_radiometer(self):
     self.report('powering on radiometer ... ')
     self.radiometer = Radiometer()                # create object for radiometer module
     self.RPC.on(module=self.radiometer)           # power on radiometer module
     self.check_communication_state(module=self.RPC) # check write state
-    self.check_on_state(module=self.radiometer)   # check radiometer power state
+    self.check_power_state(power_state.on,module=self.radiometer)   # check radiometer power state
 
   def off_radiometer(self):
     self.report('powering off radiometer ... ')
     self.RPC.off(module=self.radiometer)           # power off radiometer module
     self.check_communication_state(module=self.RPC) # check write state
-    self.check_off_state(module=self.radiometer)   # check radiometer power state
+    self.check_power_state(power_state.off,module=self.radiometer)   # check radiometer power state
 
   def on_shutter(self):
     self.report('opening shutter ... ')
     self.shutter = Shutter()                 # create object for shutter module
     self.RPC.on(module=self.shutter)         # power on shutter module
     self.check_communication_state(module=self.RPC) # check write state
-    self.check_on_state(module=self.shutter) # check shutter power state
+    self.check_power_state(power_state.on,module=self.shutter) # check shutter power state
 
   def off_shutter(self):
     self.report('closing shutter ... ')
     self.RPC.off(module=self.shutter)         # power off shutter module
     self.check_communication_state(module=self.RPC) # check write state
-    self.check_off_state(module=self.shutter) # check shutter power state
+    self.check_power_state(power_state.off,module=self.shutter) # check shutter power state
 
   def on_laser(self):
     self.report('  powering on laser ... ')
     self.laser = Laser()                   # create object for laser module
     self.RPC.on(module=self.laser)         # power on laser module
     self.check_communication_state(module=self.RPC) # check write state
-    self.check_on_state(module=self.laser) # check laser power state
+    self.check_power_state(power_state.on,module=self.laser) # check laser power state
 
   def off_laser(self):
     self.report('  powering off laser ... ')
     self.RPC.off(module=self.laser)         # power off laser
     self.check_communication_state(module=self.RPC) # check write state
-    self.check_off_state(module=self.laser) # check laser power state
+    self.check_power_state(power_state.off,module=self.laser) # check laser power state
 
   # radiometer commands
   def init_radiometer(self):
     self.report('initializing radiometer ... ')
     self.radiometer.init()                         # init radiometer module
     self.check_communication_state(module=self.radiometer) # check write state
-    self.check_init_state(module=self.radiometer)  # check radiometer conf state
+    self.check_conf_state(conf_state.initialized,module=self.radiometer)  # check radiometer conf state
 
   def read_radiometer_data(self):
     radiometer_datum = self.radiometer.read_data()
