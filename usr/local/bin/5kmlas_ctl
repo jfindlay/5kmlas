@@ -4,11 +4,10 @@
 # findlay@cosmic.utah.edu
 
 # TODO:
-# - Run data and non-run PTH data will be batched onto the data USB storage
-#   and formatted into a DST bank by a local cron job.  It will then be
-#   transferred to Middle Drum, where it will be pooled into the regular data
-#   collection and processing streams as already implemented in Middle Drum
-#   operations.
+# - Run data and non-run PTH data will be written onto the data USB storage as
+#   a DST bank.  It will then be transferred to Middle Drum, where it will be
+#   pooled into the regular data collection and processing streams as already
+#   implemented in Middle Drum software operations.
 # - develop rigorous and thorough hardware failure simulation routine
 # - replace color code with curses color code
 # - replace custom logging with python logging module
@@ -16,7 +15,7 @@
 # list of modules:
 # - control
 #   * data
-#   * charge controller
+#   * charger
 #   * PTH
 #     - rain
 #     - heater
@@ -26,16 +25,18 @@
 #     - shutter
 #     - laser
 # modules which are always powered on, or in constant use:
-#   SBC, PTH, radio, antenna, charge controller, batteries, solar panels
+#   SBC, PTH, radio, antenna, charger, batteries, solar panels
 # modules powered on by SBC controlling program:
 #   rain sensor, heater, inverter, RPC, radiometer, shutter, laser
 
 import os,sys,re,socket
 from time import sleep
-from datetime import datetime,timedelta
+from datetime import datetime,timedelta,tzinfo,time
 from optparse import OptionParser,OptionGroup
 from serial import Serial,SerialException,SerialTimeoutException
 from pymodbus.client.sync import ModbusSerialClient as ModbusClient
+from pymodbus.device import ModbusDeviceIdentification
+from pymodbus.exceptions import ModbusException
 from curses.ascii import US as US_chr
 
 US = chr(US_chr) # unit separator
@@ -85,6 +86,11 @@ class Enum:
     try : return max([x for x in vars(self).values() if type(x)==type(0)]) + 1
     except ValueError : return 0
 
+  def lookup(self,num):
+    '''Lookup enum value by number.'''
+    d = dict((v,k) for k, v in vars(self).iteritems())
+    return d[num]
+
   def _parse(self,names):
     ### If names is a string, parse it as a list of names.
     if type(names) == type('') : return names.split()
@@ -97,36 +103,80 @@ power_state = Enum('undefined on off')
 conf_state = Enum('undefined initialized finalized error')
 rain_state = Enum('dry wet open')
 # serial states
-communication_state = Enum('success error timeout')
+communication_state = Enum('undefined success error timeout')
 # socket IPC
 socket_side = Enum('daemon operator calibrator')
 signal = Enum('initialize error finalize')
 
+# for some reason I have to implement the notion of UTC
+class UTC(tzinfo):
+  def __init__(self) : super(UTC,self).__init__()
+  def __str__(self) : return 'UTC'
+  def __repr__(self) : return self.__str__()
+  def tzname(self,dt) : return self.__str__()
+  def utcoffset(self,dt) : return timedelta(0)
+  def dst(self,dt) : return timedelta(0)
+utc = UTC()
+
 class Data:
+  '''
+  data is written to data part files with one part per UTC day.  Data events
+  are streamed into the data object where they are buffered until written to
+  the appropriate file.  Each data event contains a timestamp, which is used to
+  determine which data part the event will be written to.  If the data
+  collected spans more than one UTC day, the event will all go into the day
+  that matches its timestamp.
+  '''
   def __init__(self):
-    self.radiometer = []
-    self.charge_controller = []
-    self.PTH = []
-    zero_time = datetime.utcfromtimestamp(0)
-    self.times = {'start':zero_time,'stop':zero_time}
+    self.storage_location = '/tmp/data' # location of data files
+    if not os.path.exists(self.storage_location):
+      os.makedirs(self.storage_location)
+    if not os.path.isdir(self.storage_location):
+      raise OSError('data storage location is not a directory')
+    self.buffer = []
+    self.zero_datetime = datetime.utcfromtimestamp(0) # 1970-01-01 00:00:00.000000 UTC
+    self.zero_time = time(0,0,0,0,utc) # 00:00:00.000000 UTC
 
   def append(self,*args,**kwargs):
-    if 'radiometer_datum' in kwargs:
-      self.radiometer.append(kwargs['radiometer_datum'])
-    if 'charge_controller_datum' in kwargs:
-      self.charge_controller.append(kwargs['charge_controller_datum'])
-    if 'PTH_datum' in kwargs:
-      self.PTH.append(kwargs['PTH_datum'])
-    if 'start' in kwargs:
-      self.times['start'] = kwargs['start']
-    if 'stop' in kwargs:
-      self.times['stop'] = kwargs['stop']
+    for kwarg in kwargs:
+      self.buffer.append(kwargs[kwarg])
+
   def write(self):
-    pass
     # TODO:
-    # load objects from DST.py and write data structure into DST file
-    # the format of the DST file will be a heterogeneous stream with one part per UTC day
-    # once data has been written to storage, clear all data from memory
+    # load objects from DST.py and write data structure into DST file the
+    # format of the DST file will be a heterogeneous stream with one part per
+    # UTC day.  Once data has been written to storage, clear all data from
+    # memory
+    #
+    # for now, just write the data to one ASCII file per UTC day
+    self.files = {}
+    self.buffer.sort(key=lambda item : item['timestamp']) # sort data by timestamp
+    for item in self.buffer:
+      if not item['timestamp'] in self.files.keys():
+        self.files[item['timestamp']] = self._get_file(item['timestamp'])
+      f = self.files[item['timestamp']]                   # current file
+      f.write('type:%s\n' % item['type'])                 # write item type
+      f.write('  timestamp:%s\n' % item['timestamp'])     # write item timestamp
+      for key,val in sorted(item.items()):                # write remaining data sorted by key
+        if not key == 'type' and not key == 'timestamp':
+          if isinstance(val[0],int):
+            f.write('  %s: %d %s\n' % (key,val[0],val[1]))
+          elif isinstance(val[0],float):
+            f.write('  %s: %f %s\n' % (key,val[0],val[1]))
+          else:
+            f.write('  %s: %s %s\n' % (key,val[0],val[1]))
+      f.flush() ; os.fsync(f.fileno()) # need to flush file buffer to ensure sequential write
+    self._clear()
+
+  def _clear(self):
+    for timestamp in self.files.keys():
+      self.files[timestamp].close() # close file objects
+    del self.files                  # remove file object container
+    del self.buffer[:]              # clear data buffer
+
+  def _get_file(self,timestamp):
+    date = datetime.combine(timestamp,self.zero_time).date()
+    return file(os.path.join(self.storage_location,'%s' % date),'a')
 
 # module abstract base classes #################################################
 
@@ -141,6 +191,7 @@ class SerialModule(Serial):
 
   def __init__(self,buffer_size,*args,**kwargs):
     self.buffer_size = buffer_size
+    self.communication_state = communication_state.undefined
     try:
       super(SerialModule,self).__init__(*args,**kwargs)
     except SerialException,serial_exception:
@@ -170,9 +221,23 @@ class SerialModule(Serial):
       self.message = 'failed to write to serial device %s: %s' % (self.name,timeout_exception)
       return
 
-class ModbusModule(SerialModule):
+class ModbusModule(ModbusClient):
+  '''
+  abstract base class for modbus modules.  Modbus is a protocol that can run on
+  top of serial,TCP,UDP.  ModbusClient contains a pySerial interface
+  '''
+
   def __init__(self,*args,**kwargs):
-    super(ModbusModule,self).__init__(*args,**kwargs)
+    self.communication_state = communication_state.undefined
+    try:
+      super(ModbusModule,self).__init__(*args,**kwargs)
+    except ModbusException,modbus_exception:
+      self.conf_state = conf_state.error
+      self.message = 'failed to initialize %s modbus connection: %s' % (self.name,serial_exception)
+      return
+
+  # TODO: overload modbus methods and catch modbus errors here
+  # try: except ModbusException:
 
 class PowerModule(object):
   '''
@@ -186,27 +251,192 @@ class PowerModule(object):
 
 class ChargeController(ModbusModule):
   def __init__(self):
-    self.buffer_size = 65536        # = 2**2**2**2 : termios read buffer size
-    self.name = 'charge controller' # charge controller module name
-    self.conf_message = ''          # state message
-    self.message = ''               # result message
-    self.communication_state = communication_state.success
-    super(ChargeController,self).__init__(self.buffer_size,'/dev/tts/0',baudrate=9600,timeout=0.5)
+    self.name = 'charger'   # charger module name
+    self.conf_message = ''  # state message
+    self.message = ''       # result message
+    self.define_enums_bitfields()
+    super(ChargeController,self).__init__(method='rtu',port='/dev/tts/3',baudrate=9600,bytesize=8,parity='N',stopbits=2,timeout=1)
     self.set_conf_state()
 
-  def set_conf_state(self):
-    self.conf_state = conf_state.initialized    # module conf state
+  def define_enums_bitfields(self):
+    self.enums = {}
+    self.bitfields = {}
+    # enums
+    self.enums['charge state'] = Enum().vals(
+        START      =0,
+        NIGHT_CHECK=1,
+        DISCONNECT =2,
+        NIGHT      =3,
+        FAULT      =4,
+        BULK_CHARGE=5,
+        ABSORPTION =6,
+        FLOAT      =7,
+        EQUALIZE   =8)
+    self.enums['load state'] = Enum().vals(
+        START      =0,
+        LOAD_ON    =1,
+        LVD_WARNING=2,
+        LVD        =3,
+        FAULT      =4,
+        DISCONNECT =5)
+    self.enums['LED state'] = Enum().vals(
+        LED_START                 =0,
+        LED_START2                =1,
+        LED_BRANCH                =2,
+        EQUALIZE_FAST_GREEN_BLINK =3,
+        FLOAT_SLOW_GREEN_BLINK    =4,
+        ABSORPTION_GREEN_BLINK_1HZ=5,
+        GREEN_LED                 =6,
+        UNDEFINED_7               =7,
+        YELLOW_LED                =8,
+        UNDEFINED_9               =9,
+        BLINK_RED_LED             =10,
+        RED_LED                   =11,
+        R_Y_G_ERROR               =12,
+        RY_G_ERROR                =13,
+        RG_Y_ERROR                =14,
+        R_Y_ERROR_HTD             =15,
+        R_G_ERROR_HVD             =16,
+        RY_GY_ERROR               =17,
+        GYR_ERROR                 =18,
+        GYR_x_2                   =19)
+    # bitfields
+    #    state                                         bit
+    self.bitfields['array fault'] = [
+        'overcurrent',                               # 0
+        'FETs shorted',                              # 1
+        'software bug',                              # 2
+        'battery HVD',                               # 3
+        'array HVD',                                 # 4
+        'EEPROM setting edit (reset required)',      # 5
+        'RTS shorted',                               # 6
+        'RTS was valid, now disconnected',           # 7
+        'local temp. sensor failed',                 # 8
+        'Fault 10',                                  # 9
+        'Fault 11',                                  # 10
+        'Fault 12',                                  # 11
+        'Fault 13',                                  # 12
+        'Fault 14',                                  # 13
+        'Fault 15',                                  # 14
+        'Fault 16']                                  # 15
+    self.bitfields['load fault'] = [
+        'external short circuit',                    # 0
+        'overcurrent',                               # 1
+        'FETs shorted',                              # 2
+        'software bug',                              # 3
+        'HVD',                                       # 4
+        'heatsink over-temperature',                 # 5
+        'EEPROM setting edit (reset required)',      # 6
+        'Fault 8']                                   # 7
+    self.bitfields['alarm'] = [
+        'RTS open',                                  # 0
+        'RTS shorted',                               # 1
+        'RTS disconnected',                          # 2
+        'Ths open',                                  # 3
+        'Ths shorted',                               # 4
+        'SSMPPT hot',                                # 5
+        'Current limit',                             # 6
+        'Current offset',                            # 7
+        'Undefined',                                 # 8
+        'Undefined',                                 # 9
+        'Uncalibrated',                              # 10
+        'RTS miswire',                               # 11
+        'Undefined',                                 # 12
+        'Undefined',                                 # 13
+        'miswire',                                   # 14
+        'FET open',                                  # 15
+        'P12',                                       # 16
+        'high Va current limit',                     # 17
+        'Alarm 19',                                  # 18
+        'Alarm 20',                                  # 19
+        'Alarm 21',                                  # 20
+        'Alarm 22',                                  # 21
+        'Alarm 23',                                  # 22
+        'Alarm 24']                                  # 23
+    self.bitfields['dip switch'] = [
+    #    1 value                              0 value                     function              bit  
+        'custom battery settings',          # User Select jumper          Battery Type          0
+        'custom load settings',             # 11.5 V / 12.6 V             LVD / LVR             1
+        'enabled (if battery type has EQ)', # disabled                    Equalize              2
+        'MODBUS protocol']                  # Meterbus (MS remote meter)  Communication Select  3
 
-  def trying(self):
-    import logging
-    logging.basicConfig()
-    log = logging.getLogger()
-    log.setLevel(logging.DEBUG)
-    self.modbus_client = ModbusClient(method='rtu',port='/dev/tts/3',baudrate=9600,bytesize=8,parity='N',stopbits=2)
-    print self.modbus_client.read_input_registers(0x008,1,unit=0x01).registers[0]*100.*2**-15
+  def structure_data(self,registers):
+    '''
+    puts charger data into a structure and performs numerical conversions
+    '''
+    self.scale = { # scale factors
+        'V':100.*2.**-15.,
+        'V ref':96.667*2.**-15.,
+        'A':79.16*2.**-15.,
+        'W':989.*2.**-16.,
+        'Ah':0.1,
+        'kWh':0.1,
+        'ratio':2.**-8.}
+    data_dict = { # dict of tuples of measurements and associated units
+        'type':                  'charger',                                     # type of data structure
+        'timestamp':              datetime.now(utc),                            # [datetime object] Time stamp
+        'battery volts':         (registers[0x0008]*self.scale['V'],'V'),       # [V] (tau = 1 s) Voltage measured directly at the battery connection on the SunSaver MPPT.
+        'array volts':           (registers[0x0009]*self.scale['V'],'V'),       # [V] (tau = 1 s) Va is the terminal voltage of the solar input connection.
+        'load volts':            (registers[0x000A]*self.scale['V'],'V'),       # [V] (tau = 1 s) Vl is the terminal voltage of the load output connection.
+        'charging current':      (registers[0x000B]*self.scale['A'],'A'),       # [A] (tau = 1 s) Charging current to the battery as measured by on-board shunt.
+        'load current':          (registers[0x000C]*self.scale['A'],'A'),       # [A] (tau = 1 s) Load current to the systems loads as measured by on-board shunt.
+        'heatsink temp':         (registers[0x000D],'^oC'),                     # [^oC] Sunsaver MPPT Heatsink temperature.
+        'battery temp':          (registers[0x000E],'^oC'),                     # [^oC] Battery temperature as measured by the ambient temperature sensor or the optional RTS (if connected).
+        'ambient temp':          (registers[0x000F],'^oC'),                     # [^oC] Ambient temperature as measured by the ambient temperature sensor.
+        # 0x0010, RTS is redundant
+        'charge state':          (registers[0x0011],'enum'),                    # [enum] Reports the charge state.
+        'array fault':           (registers[0x0012],'bitfield'),                # [bitfield] Reports faults identified by self diagnostics.
+        'slow battery volts':    (registers[0x0013]*self.scale['V'],'V'),       # [V] (tau = 25 s) Voltage measured directly at the battery connection on the SunSaver MPPT.
+        'battery ref':          (registers[0x0014]*self.scale['V ref'],'V'),    # [V] Target voltage to which the battery will be charged. This value is temperature compensated.
+        'Ah resetable charge':  ((registers[0x0015]<<16 | registers[0x0016])*self.scale['Ah'],'Ah'), # [A*h] Reports total solar amp-hours since last ah reset.
+        'Ah total charge':      ((registers[0x0017]<<16 | registers[0x0018])*self.scale['Ah'],'Ah'), # [A*h] Reports total solar amp-hours since last ah reset.
+        'kWh charge':            (registers[0x0019]*self.scale['kWh'],'kWh'),   # [kW*h] Reports total solar kilowatt-hours since last ah/kWh reset.
+        'load state':            (registers[0x001A],'enum'),                    # [enum] Reports the charge state.
+        'load fault':            (registers[0x001B],'bitfield'),                # [bitfield] Reports faults identified by self diagnostics.
+        'low disconnect volts': (registers[0x001C]*self.scale['V'],'V'),        # [V] Low voltage disconnect setpoint, current compensated.
+        'resetable load':       ((registers[0x001D]<<16 | registers[0x001E])*self.scale['Ah'],'Ah'), # [A*h] Reports total load amp-hours since last ah reset.
+        'total load':           ((registers[0x001F]<<16 | registers[0x0020])*self.scale['Ah'],'Ah'), # [A*h] Reports total load amp-hours since last ah reset.
+        'hour meter':            (registers[0x0021]<<16 | registers[0x0022],'h'), # [h] Reports total hours of operation since installed.
+        'alarm':                 (registers[0x0023]<<16 | registers[0x0024],'bitfield'), # [bitfield] Reports alarms identified by self diagnostics. Each bit corresponds to a specific alarm.
+        'dip switch':            (registers[0x0025],'bitfield'),                # [bitfield] Each bit in the bit-field corresponds to an individual DIP switch setting.
+        'LED state':             (registers[0x0026],'enum'),                    # [enum] Reports the LED state.
+        'power out':             (registers[0x0027]*self.scale['W'],'W'),       # [W] Output power to the battery.
+        # sweep data is irrelevant, since the charger is regularly polled
+       #'sweep Vmp':             (registers[0x0028]*self.scale['V'],'V'),       # [V] Maximum power voltage of the solar array found during last sweep.
+       #'sweep Pmax':            (registers[0x0029]*self.scale['W'],'V'),       # [W] Maximum power output of the solar array found during last sweep.
+       #'sweep Voc':             (registers[0x002A]*self.scale['V'],'V'),       # [V] Open circuit voltage of the solar array found during last sweep.
+       #'daily Vb min':          (registers[0x002B]*self.scale['V'],'V'),       # [V] Minimum battery voltage measured today (value resets after dark).
+       #'daily Vb max':          (registers[0x002C]*self.scale['V'],'V'),       # [V] Maximum battery voltage measured today (value resets after dark).
+       #'daily Ah load':         (registers[0x002E]*self.scale['Ah'],'Ah'),     # [A*h] Total load amp-hours accumulated today (value resets after dark).
+       #'daily array fault':     (registers[0x002F],'bitfield'),                # [bitfield] Reports array faults identified by self diagnostics that occurred today.
+       #'daily load fault':      (registers[0x0030],'bitfield'),                # [bitfield] Reports load faults identified by self diagnostics that occurred today.
+       #'daily alarm':           (registers[0x0031]<<16 | registers[0x0032],'bitfield'), # [bitfield] Reports alarms identified by self diagnostics that occurred today.
+       #'min Vb':                (registers[0x0033]*self.scale['V'],'V'),       # [V] Tracks the minimum battery voltage over time.
+       #'max Vb':                (registers[0x0034]*self.scale['V'],'V'),       # [V] Tracks the maximum battery voltage over time.
+        }
+    return data_dict
+
+  def set_conf_state(self): # TODO: read vendor name, etc.
+    self.conf_state = conf_state.initialized # module conf state
 
   def poll_data(self):
-    pass
+    registers = self.read_holding_registers(0x0000,0x0028,unit=0x01).registers
+    data_dict = self.structure_data(registers)
+    self.convert_enums_bitfields(data_dict)
+    return data_dict
+
+  def convert_enums_bitfields(self,data_dict):
+    # convet enums
+    for parameter in ('charge state','load state','LED state'):
+      state = self.enums[parameter].lookup(data_dict[parameter][0])
+      data_dict[parameter] = (state,'enum')
+    # convert bitfields
+    for parameter in ('array fault','load fault','alarm','dip switch'):
+      state = []
+      for offset in xrange(32): # 2**32 == 16**8, MPPT double register data values are 16**8 large
+        if (data_dict[parameter][0] >> offset) & 1:
+          state.append(self.bitfields[parameter][offset])
+      data_dict[parameter] = (state,'bitfield')
 
 class PTH(SerialModule):
   '''
@@ -256,7 +486,7 @@ class PTH(SerialModule):
   def on(self,module=None): # close a PTH switch
     self.write('%s\r\n' % module.PTH_on_command) # close PTH switch for module
     module.PTH_message = self.read()             # capture PTH message
-    self.check_switch_state(module=module)       # check module power on
+    self.set_power_state(module=module)       # check module power on
     if module.power_state == power_state.on:     # if module powered on
       sleep(module.power_on_sleep)               # wait for module to stabilize
       module.message = '%s is on PTH switch %s' % (module.name,module.PTH_switch)
@@ -269,7 +499,7 @@ class PTH(SerialModule):
   def off(self,module=None): # open a PTH switch
     self.write('%s\r\n' % module.PTH_off_command) # open PTH switch for module
     module.PTH_message = self.read()              # capture PTH message
-    self.check_switch_state(module=module)        # check module power off
+    self.set_power_state(module=module)        # check module power off
     if module.power_state == power_state.off:     # if module powered off
       sleep(module.power_off_sleep)               # wait for module to stabilize
       module.message = '%s is on PTH switch %s' % (module.name,module.PTH_switch)
@@ -279,7 +509,7 @@ class PTH(SerialModule):
       module.message += '\nPTH message: "%s"' % module.PTH_message
       module.message += '\nPTH message should be: "%s"' % module.PTH_off_command
 
-  def check_switch_state(self,module=None):
+  def set_power_state(self,module=None):
     if re.search(r'%s' % module.PTH_on_command,module.PTH_message,re.M):
       module.power_state = power_state.on
     elif re.search(r'%s' % module.PTH_off_command,module.PTH_message,re.M):
@@ -289,38 +519,42 @@ class PTH(SerialModule):
 
   def poll_data(self):
     self.read() # clear output buffer
-    self.write('PRESS\r\n')  ; press = self.read()
-    self.write('TEMP\r\n')   ; temp = self.read()
-    self.write('HUMID\r\n')  ; humid = self.read()
-    self.write('RAIN\r\n')   ; rain = self.read()
-    self.write('SUPPLY\r\n') ; supply = self.read()
-    data_dict = {'timestamp':datetime.utcnow()}
-    for measure in press,temp,humid,supply:
-      if len(measure) != 0:
-        # typical datum = ['PRESS','867.3']
-        datum = re.split(r'\s+',measure.strip())
-        if measure == rain:
-          data_dict[rain_datum[0]] = rain_datum[1]
-        else:
-          data_dict[datum[0]] = float(datum[1])
+    self.write('PRESS\r\n')  ; press  = re.search(r'PRESS\s+(\S+)',self.read()).group(1)
+    self.write('TEMP\r\n')   ; temp   = re.search(r'TEMP\s+(\S+)',self.read()).group(1)
+    self.write('HUMID\r\n')  ; humid  = re.search(r'HUMID\s+(\S+)',self.read()).group(1)
+    self.write('RAIN\r\n')   ; rain   = re.search(r'RAIN\s+(\S+)',self.read()).group(1)
+    self.write('SUPPLY\r\n') ; supply = re.search(r'SUPPLY\s+(\S+)',self.read()).group(1)
+    data_dict = {
+        'type':'PTH',
+        'timestamp':datetime.now(utc),
+        'PRESS':(press,'Pa'),
+        'TEMP':(temp,'K'),
+        'HUMID':(humid,'%'),
+        'RAIN':(rain,'enum'),
+        'SUPPLY':(supply,'V')}
     return data_dict
 
   def poll_rain(self,module=None):
     self.read() # clear output buffer
     self.write('RAIN\r\n')
-    message = self.read()      # read rain state
+    message = re.search(r'(RAIN\s+\S+)',self.read()).group(1) # read rain state
     if len(message) != 0:
       module.PTH_message = message
       rain_datum = re.split(r'\s+',module.PTH_message)
-      if rain_datum[1] == 'D': # dry
-        module.rain_state = rain_state.dry
-        module.message = 'no rain: "%s"' % module.PTH_message
-      if rain_datum[1] == 'W': # wet
-        module.rain_state = rain_state.wet
-        module.message = 'rain detected: "%s"' % module.PTH_message
-      if rain_datum[1] == 'X': # open or no rain monitor
-        module.rain_state = rain_state.open
-        module.message = '%s open or no %s present: "%s"' % (module.name,module.name,module.PTH_message)
+      self.set_rain_state(rain_datum,module=module)
+    else:
+      pass # a call to self.read sets the communication_state flag, so we don't need to handle it here
+
+  def set_rain_state(self,rain_datum,module=None):
+    if rain_datum[1] == 'D': # dry
+      module.rain_state = rain_state.dry
+      module.message = 'no rain: "%s"' % module.PTH_message
+    if rain_datum[1] == 'W': # wet
+      module.rain_state = rain_state.wet
+      module.message = 'rain detected: "%s"' % module.PTH_message
+    if rain_datum[1] == 'X': # open or no rain monitor
+      module.rain_state = rain_state.open
+      module.message = '%s open or no %s present: "%s"' % (module.name,module.name,module.PTH_message)
 
 class Rain(PowerModule):
   '''rain module'''
@@ -500,7 +734,7 @@ class Radiometer(SerialModule,PowerModule):
         energies.append(float(i))
       except:
         pass
-    data_dict = {'timestamp':datetime.utcnow(),'energies':energies}
+    data_dict = {'type':'radiometer','timestamp':datetime.now(utc),'energies':(energies,'J')}
     return data_dict
 
 class Shutter(PowerModule):
@@ -533,8 +767,8 @@ def is_at_timepoint(t,d,e):
   '''
   test whether the current time t is within an epsilon e of one of the
   timepoints n defined by n*d = 1 day, where d is a time difference
-  
-  It is expected that d will be within the range 1 <= d <= 86400 s.
+
+  It is expected that 0 < e < d and d will be within the range 1 <= d <= 86400 s.
   '''
   day = timedelta(days=1)
   n = 0 # number of timepoints within a day
@@ -694,6 +928,7 @@ class Control(object):
 
   def setup_modules(self):
     # create submodule stubs
+    self.charger = None
     self.PTH = None
     self.rain = None
     self.heater = None
@@ -852,19 +1087,29 @@ class Control(object):
     self.data = Data() # data structure
 
   def write_data(self):
-    self.report('writing data ... ')
+    if self.phase == phase.final:
+      self.report('writing data ... ')
+    else:
+      self.detail('writing data ... ')
     self.data.write() # format and save data, then clear data buffer
-    self.report('done\n',color=self.GREEN)
+    if self.phase == phase.final:
+      self.report('done\n',color=self.GREEN)
+    else:
+      self.detail('done\n',color=self.GREEN)
 
-  # charge controller commands
-  def init_charge_controller(self):
-    self.report('initializing charge controller modbus interface ... ')
-    self.charge_controller = ChargeController() # init charge controller
-    self.check_communication_state(module=self.charge_controller) # check write state
-    self.check_conf_state(conf_state.initialized,module=self.charge_controller) # check charge controller init state
+  # charger commands
+  def init_charger(self):
+    self.report('initializing charger modbus interface ... ')
+    self.charger = ChargeController()                                 # init charger
+    self.check_communication_state(module=self.charger)               # check write state
+    self.check_conf_state(conf_state.initialized,module=self.charger) # check charger init state
 
-  def collect_charge_controller_datum(self):
-    charge_controller_datum = self.charge_controller.poll_data()
+  def collect_charger_datum(self):
+    charger_datum = self.charger.poll_data()
+    self.check_communication_state(module=self.charger) # check write state
+    self.data.append(charger_datum=charger_datum)       # append datum
+    self.detail('%s\n' % charger_datum)                 # print charger datum when verbose
+    return charger_datum
 
   # PTH commands
   def init_PTH(self):
@@ -977,10 +1222,10 @@ class Control(object):
     self.check_communication_state(module=self.radiometer) # check write state
     self.check_conf_state(conf_state.initialized,module=self.radiometer)  # check radiometer conf state
 
-  def read_radiometer_data(self):
+  def read_radiometer_data(self,run_times=None):
     radiometer_datum = self.radiometer.read_data()
     self.check_communication_state(module=self.radiometer)
-    self.data.append(radiometer_datum=radiometer_datum)
+    self.data.append(radiometer_datum=radiometer_datum,run_times=run_times)
 
 class Daemon(Control):
   '''
@@ -995,7 +1240,7 @@ class Daemon(Control):
 
   def __init__(self,opts):
     super(Daemon,self).__init__(opts)             # daemon is a control module
-    self.sleep_time = 5                           # run loop sleep
+    self.sleep_time = 5                           # run loop sleep [s]
     self.connected = False                        # connected to operator
     self.socket = Socket(side=socket_side.daemon) # IPC socket
 
@@ -1017,12 +1262,12 @@ class Daemon(Control):
 
   def init(self):
     self.phase = phase.init
-    self.init_data()              # init data structure
-    self.init_charge_controller() # init charge controller
-    self.init_PTH()               # init PTH board
-    self.on_rain()                # power on rain monitor
-    self.poll_rain()              # check rain state
-    self.on_heater()              # power on window heater
+    self.init_data()    # init data structure
+    self.init_charger() # init charger
+    self.init_PTH()     # init PTH board
+    self.on_rain()      # power on rain monitor
+    self.poll_rain()    # check rain state
+    #self.on_heater()    # power on window heater
 
   def run(self):
     '''
@@ -1034,7 +1279,7 @@ class Daemon(Control):
     in the loop.  We set epsilon to be less than sleep time and ensure that
     sleep time - epsilon is longer than the time it takes to complete every
     conditional block within the following while loop.
-    
+
     Each conditional tests whether the current time is within epsilon of a
     timepoint, where the timepoints are the divisions of a UTC day by the
     supplied timedelta.
@@ -1043,13 +1288,13 @@ class Daemon(Control):
     self.report('running\n',color=self.GRAY)
     epsilon = timedelta(seconds=self.sleep_time-1)           # 1 s less than sleep time
     while True:
-      now = datetime.utcnow()
+      now = datetime.now(utc)
       if self.socket.accept():                               # once every self.sleep_time s
         self.operator_communicate()
       if is_at_timepoint(now,timedelta(hours=2),epsilon):    # once every 2 h
         self.write_data()
       if is_at_timepoint(now,timedelta(minutes=15),epsilon): # once every 15 m
-        self.collect_charge_controller_datum()
+        self.collect_charger_datum()
         self.collect_PTH_datum()
       else:
         sleep(self.sleep_time)
@@ -1084,32 +1329,29 @@ class Daemon(Control):
     self.phase = phase.run
     self.report('collecting data\n',color=self.GRAY)
     five_minutes = timedelta(seconds=10)
-    now = self.start_time = datetime.utcnow()     # record laser on time
+    now = self.start_time = datetime.now(utc)     # record laser on time
     self.on_laser()                               # power on laser
     while (now < self.start_time + five_minutes): # run for 5 m
-      self.collect_charge_controller_datum()
+      self.collect_charger_datum()
       self.collect_PTH_datum()
-      sleep(5)                                    # collect charge controller,PTH data every 5 s
-      now = datetime.utcnow()                     # new timestamp
+      sleep(5)                                    # collect charger,PTH data every 5 s
+      now = datetime.now(utc)                     # new timestamp
     self.off_laser()                              # power off laser
-    self.collect_charge_controller_datum()        # collect final charge controller datum
+    self.collect_charger_datum()                  # collect final charger datum
     self.collect_PTH_datum()                      # collect final PTH datum
-    self.stop_time = datetime.utcnow()            # record laser off time
+    self.stop_time = datetime.now(utc)            # record laser off time
     self.report('done collecting\n',color=self.GRAY)
 
   def operator_final(self):
     self.phase = phase.final
     self.off_shutter()          # close shutter
-    self.read_radiometer_data() # read radiometer data
-    self.data.append(start=self.start_time,stop=self.stop_time) # collect run times
+    run_times = {'start':self.start_time,'stop':self.stop_time}
+    self.read_radiometer_data(run_times) # read radiometer data and append run times
     self.write_data()           # write data
     self.off_radiometer()       # power off radiometer
     self.off_inverter()         # power off inverter
     # print all data when verbose
-    self.detail('%s\n' % self.data.radiometer)
-    self.detail('%s\n' % self.data.charge_controller)
-    self.detail('%s\n' % self.data.PTH)
-    self.detail('%s\n' % self.data.times)
+    self.detail('%s\n' % self.data)
 
 class Operator(Control):
   '''
@@ -1131,8 +1373,6 @@ class Operator(Control):
     self.socket = Socket(side=socket_side.operator) # IPC socket
 
   def daemon_communicate(self):
-    self.init_charge_controller()
-    self.charge_controller.trying() ; sys.exit()
     self.write_socket('%d' % signal.initialize)
     self.connected = True
     while True:                             # from here on, daemon process is in control
@@ -1225,3 +1465,6 @@ if __name__ == '__main__':
     main()
   except KeyboardInterrupt:
     sys.exit(0)
+  except OSError,oserror:
+    print oserror
+    sys.exit(1)
