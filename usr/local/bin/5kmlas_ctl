@@ -41,11 +41,11 @@
 #   * PTH: measures environmental state, controls the power states of other modules
 #     - rain: measures rain state: dry,wet,open/none
 #     - heater: heats laser exit window
-#     - inverter: converts battery supply current to AC
+#     - inverter: converts battery DC supply current to AC
 #   * RPC: controls power states of AC modules
 #     - radiometer: measures laser intensity
 #     - shutter: opens and closes laser exit port
-#     - laser: source of calibration radiation
+#     - laser: source of Middle Drum calibration radiation
 # modules which are always powered on, or in constant use:
 #   SBC, PTH, radio, antenna, charger, batteries, solar array
 # modules powered on by SBC controlling program:
@@ -281,6 +281,7 @@ class Charger(ModbusModule):
     super(Charger,self).__init__(method='rtu',port='/dev/tts/3',baudrate=9600,bytesize=8,parity='N',stopbits=2,timeout=1)
     self.set_conf_state()
 
+  # TODO: add sweep enums, bitfields
   def define_enums(self):
     self.enums = {}
     self.enums['charge state'] = Enum().vals(
@@ -385,7 +386,7 @@ class Charger(ModbusModule):
 
   def structure_data(self,registers):
     '''
-    puts charger data into a structure and performs numerical conversions
+    convert numerical data to standard units and structure charger data
     '''
     self.scale = { # scale factors
         'V':100.*2.**-15.,
@@ -424,18 +425,18 @@ class Charger(ModbusModule):
         'dip switch':            (registers[0x0025],'bitfield'),                # [bitfield] Each bit in the bit-field corresponds to an individual DIP switch setting.
         'LED state':             (registers[0x0026],'enum'),                    # [enum] Reports the LED state.
         'power out':             (registers[0x0027]*self.scale['W'],'W'),       # [W] Output power to the battery.
-        # sweep data is irrelevant, since the charger is regularly polled
-       #'sweep Vmp':             (registers[0x0028]*self.scale['V'],'V'),       # [V] Maximum power voltage of the solar array found during last sweep.
-       #'sweep Pmax':            (registers[0x0029]*self.scale['W'],'V'),       # [W] Maximum power output of the solar array found during last sweep.
-       #'sweep Voc':             (registers[0x002A]*self.scale['V'],'V'),       # [V] Open circuit voltage of the solar array found during last sweep.
-       #'daily Vb min':          (registers[0x002B]*self.scale['V'],'V'),       # [V] Minimum battery voltage measured today (value resets after dark).
-       #'daily Vb max':          (registers[0x002C]*self.scale['V'],'V'),       # [V] Maximum battery voltage measured today (value resets after dark).
-       #'daily Ah load':         (registers[0x002E]*self.scale['Ah'],'Ah'),     # [A*h] Total load amp-hours accumulated today (value resets after dark).
-       #'daily array fault':     (registers[0x002F],'bitfield'),                # [bitfield] Reports array faults identified by self diagnostics that occurred today.
-       #'daily load fault':      (registers[0x0030],'bitfield'),                # [bitfield] Reports load faults identified by self diagnostics that occurred today.
-       #'daily alarm':           (registers[0x0031]<<16 | registers[0x0032],'bitfield'), # [bitfield] Reports alarms identified by self diagnostics that occurred today.
-       #'min Vb':                (registers[0x0033]*self.scale['V'],'V'),       # [V] Tracks the minimum battery voltage over time.
-       #'max Vb':                (registers[0x0034]*self.scale['V'],'V'),       # [V] Tracks the maximum battery voltage over time.
+        # sweep data is redundant, since the charger is regularly polled, but may be useful
+        'sweep Vmp':             (registers[0x0028]*self.scale['V'],'V'),       # [V] Maximum power voltage of the solar array found during last sweep.
+        'sweep Pmax':            (registers[0x0029]*self.scale['W'],'V'),       # [W] Maximum power output of the solar array found during last sweep.
+        'sweep Voc':             (registers[0x002A]*self.scale['V'],'V'),       # [V] Open circuit voltage of the solar array found during last sweep.
+        'daily Vb min':          (registers[0x002B]*self.scale['V'],'V'),       # [V] Minimum battery voltage measured today (value resets after dark).
+        'daily Vb max':          (registers[0x002C]*self.scale['V'],'V'),       # [V] Maximum battery voltage measured today (value resets after dark).
+        'daily Ah load':         (registers[0x002E]*self.scale['Ah'],'Ah'),     # [A*h] Total load amp-hours accumulated today (value resets after dark).
+        'daily array fault':     (registers[0x002F],'bitfield'),                # [bitfield] Reports array faults identified by self diagnostics that occurred today.
+        'daily load fault':      (registers[0x0030],'bitfield'),                # [bitfield] Reports load faults identified by self diagnostics that occurred today.
+        'daily alarm':           (registers[0x0031]<<16 | registers[0x0032],'bitfield'), # [bitfield] Reports alarms identified by self diagnostics that occurred today.
+        'min Vb':                (registers[0x0033]*self.scale['V'],'V'),       # [V] Tracks the minimum battery voltage over time.
+        'max Vb':                (registers[0x0034]*self.scale['V'],'V'),       # [V] Tracks the maximum battery voltage over time.
         }
     return data_dict
 
@@ -449,6 +450,9 @@ class Charger(ModbusModule):
     return data_dict
 
   def convert_enums_bitfields(self,data_dict):
+    '''
+    convert enums and bitfields into standard python types
+    '''
     # convet enums
     for parameter in ('charge state','load state','LED state'):
       state = self.enums[parameter].lookup(data_dict[parameter][0])
