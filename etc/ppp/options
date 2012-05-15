@@ -7,17 +7,13 @@
 
 115200
 
-/dev/ttyAM1
+/dev/ttyUSB0
 
 asyncmap 0
 
 noauth
 
-nocrtscts
-
-nocdtrcts
-
-xonxoff
+crtscts
 
 # If you change the linkname you must also modify each occurrence of
 # "/var/run/pppd-${linkname}.pid" in /etc/init.d/ppp
@@ -27,10 +23,7 @@ local
 
 lock
 
-mru 296
-mtu 296
-
-192.168.0.2:192.168.0.1
+192.168.0.1:192.168.0.2
 
 netmask 255.255.255.0
 
@@ -50,7 +43,7 @@ silent
 # all control characters).
 #-am
 
-#-detach
+-detach
 
 # Disable IP address negotiation (with this option, the remote IP
 # address must be specified with an option on the command line or in

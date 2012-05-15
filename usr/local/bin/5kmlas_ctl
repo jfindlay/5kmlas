@@ -4,7 +4,13 @@
 # findlay@cosmic.utah.edu
 
 # TODO:
-# - Run data and non-run PTH data will be written onto the data USB storage as
+# - new schema: move all daemon polling operations to a cron function
+#   * interactive process connects operator directly with physical and logical modules
+#   * set /tmp/running file to prevent simultaneous running of daemon poll and operator program
+#   * each instance of daemon or operator will run once and write at the end to a location in /tmp/data
+#   * if operator is initiated while daemon is running, operator process will wait until daemon process completes (maybe check PID?)
+#   * daemon gathers all data at the end of each UTC day, writes it to /usr/local/data, and rsyncs it back to Middle Drum
+# - run data and non-run PTH data will be written onto the data USB storage as
 #   a DST bank.  It will then be transferred to Middle Drum, where it will be
 #   pooled into the regular data collection and processing streams as already
 #   implemented in Middle Drum software operations.
@@ -12,20 +18,27 @@
 # - replace color code with curses color code
 # - replace custom logging with python logging module
 
-# list of modules:
-# - control
-#   * data
-#   * charger
-#   * PTH
-#     - rain
-#     - heater
-#     - inverter
-#   * RPC
-#     - radiometer
-#     - shutter
-#     - laser
+# A module is a discrete, active component of the 5kmlas system.  It consists
+# of either a physical unit and a corresponding python class/object singleton or
+# just the python class/object.
+#
+# list of modules in the hierarchy of program control:
+# - control: logical module.  Functions like a control panel.  All other
+#   modules connect with the control module in unified manner.  Provides
+#   failsafe shutdown functionality.
+#   * data: logical module.  Stores data in memory, writes it to /tmp/data and /root/data
+#   * charger: regulates electrical energy supply and use among the solar
+#     array, battery array, and other modules.
+#   * PTH: measures environmental state, controls the power states of other modules
+#     - rain: measures rain state: dry,wet,open/none
+#     - heater: heats laser exit window
+#     - inverter: converts battery supply current to AC
+#   * RPC: controls power states of AC modules
+#     - radiometer: measures laser intensity
+#     - shutter: opens and closes laser exit port
+#     - laser: source of calibration radiation
 # modules which are always powered on, or in constant use:
-#   SBC, PTH, radio, antenna, charger, batteries, solar panels
+#   SBC, PTH, radio, antenna, charger, batteries, solar array
 # modules powered on by SBC controlling program:
 #   rain sensor, heater, inverter, RPC, radiometer, shutter, laser
 
@@ -44,7 +57,8 @@ US = chr(US_chr) # unit separator
 class Enum:
   # this idiom is from http://norvig.com/python-iaq.html.  It might be better
   # to use collections.namedtuple, but this datatype wasn't added to python
-  # until 2.6 and I would have to upgrade debian to squeeze
+  # until 2.6 and I would have to upgrade debian to squeeze, which uses the new
+  # ARM ABI
   '''
   Create an enumerated type, then add var/value pairs to it.
   The constructor and the method .ints(names) take a list of variable names,
@@ -101,7 +115,7 @@ phase = Enum('init run final')           # phase
 # hardware states
 power_state = Enum('undefined on off')
 conf_state = Enum('undefined initialized finalized error')
-rain_state = Enum('dry wet open')
+rain_state = Enum('dry wet open unknown')
 # serial states
 communication_state = Enum('undefined success error timeout')
 # socket IPC
@@ -137,46 +151,43 @@ class Data:
     self.zero_datetime = datetime.utcfromtimestamp(0) # 1970-01-01 00:00:00.000000 UTC
     self.zero_time = time(0,0,0,0,utc) # 00:00:00.000000 UTC
 
+  def __del__(self):
+    try : self.write()
+    except : pass
+
   def append(self,*args,**kwargs):
     for kwarg in kwargs:
       self.buffer.append(kwargs[kwarg])
 
   def write(self):
     # TODO:
-    # load objects from DST.py and write data structure into DST file the
+    # load objects from DST.py and write data structure into DST file.  The
     # format of the DST file will be a heterogeneous stream with one part per
     # UTC day.  Once data has been written to storage, clear all data from
     # memory
     #
-    # for now, just write the data to one ASCII file per UTC day
+    # for now, just pprint the data to one ASCII file per UTC day
     self.files = {}
+    from pprint import pprint
     self.buffer.sort(key=lambda item : item['timestamp']) # sort data by timestamp
     for item in self.buffer:
+      # while iterating over data, instantiate necessary file objects
       if not item['timestamp'] in self.files.keys():
         self.files[item['timestamp']] = self._get_file(item['timestamp'])
       f = self.files[item['timestamp']]                   # current file
-      f.write('type:%s\n' % item['type'])                 # write item type
-      f.write('  timestamp:%s\n' % item['timestamp'])     # write item timestamp
-      for key,val in sorted(item.items()):                # write remaining data sorted by key
-        if not key == 'type' and not key == 'timestamp':
-          if isinstance(val[0],int):
-            f.write('  %s: %d %s\n' % (key,val[0],val[1]))
-          elif isinstance(val[0],float):
-            f.write('  %s: %f %s\n' % (key,val[0],val[1]))
-          else:
-            f.write('  %s: %s %s\n' % (key,val[0],val[1]))
-      f.flush() ; os.fsync(f.fileno()) # need to flush file buffer to ensure sequential write
+      pprint(item,f,indent=2,width=160)                   # write item
+      f.flush() ; os.fsync(f.fileno())                    # flush buffer out to file
     self._clear()
+
+  def _get_file(self,timestamp):
+    date = datetime.combine(timestamp,self.zero_time).date()
+    return file(os.path.join(self.storage_location,'%s' % date),'a')
 
   def _clear(self):
     for timestamp in self.files.keys():
       self.files[timestamp].close() # close file objects
     del self.files                  # remove file object container
     del self.buffer[:]              # clear data buffer
-
-  def _get_file(self,timestamp):
-    date = datetime.combine(timestamp,self.zero_time).date()
-    return file(os.path.join(self.storage_location,'%s' % date),'a')
 
 # module abstract base classes #################################################
 
@@ -249,19 +260,18 @@ class PowerModule(object):
 
 # module classes ###############################################################
 
-class ChargeController(ModbusModule):
+class Charger(ModbusModule):
   def __init__(self):
-    self.name = 'charger'   # charger module name
-    self.conf_message = ''  # state message
-    self.message = ''       # result message
-    self.define_enums_bitfields()
-    super(ChargeController,self).__init__(method='rtu',port='/dev/tts/3',baudrate=9600,bytesize=8,parity='N',stopbits=2,timeout=1)
+    self.name = 'charge controller'   # charger module name
+    self.conf_message = ''            # state message
+    self.message = ''                 # result message
+    self.define_enums()
+    self.define_bitfields()
+    super(Charger,self).__init__(method='rtu',port='/dev/tts/3',baudrate=9600,bytesize=8,parity='N',stopbits=2,timeout=1)
     self.set_conf_state()
 
-  def define_enums_bitfields(self):
+  def define_enums(self):
     self.enums = {}
-    self.bitfields = {}
-    # enums
     self.enums['charge state'] = Enum().vals(
         START      =0,
         NIGHT_CHECK=1,
@@ -300,7 +310,9 @@ class ChargeController(ModbusModule):
         RY_GY_ERROR               =17,
         GYR_ERROR                 =18,
         GYR_x_2                   =19)
-    # bitfields
+
+  def define_bitfields(self):
+    self.bitfields = {}
     #    state                                         bit
     self.bitfields['array fault'] = [
         'overcurrent',                               # 0
@@ -354,7 +366,7 @@ class ChargeController(ModbusModule):
         'Alarm 23',                                  # 22
         'Alarm 24']                                  # 23
     self.bitfields['dip switch'] = [
-    #    1 value                              0 value                     function              bit  
+       # 1 value                              0 value                     function              bit
         'custom battery settings',          # User Select jumper          Battery Type          0
         'custom load settings',             # 11.5 V / 12.6 V             LVD / LVR             1
         'enabled (if battery type has EQ)', # disabled                    Equalize              2
@@ -486,7 +498,7 @@ class PTH(SerialModule):
   def on(self,module=None): # close a PTH switch
     self.write('%s\r\n' % module.PTH_on_command) # close PTH switch for module
     module.PTH_message = self.read()             # capture PTH message
-    self.set_power_state(module=module)       # check module power on
+    self.set_power_state(module=module)          # check module power on
     if module.power_state == power_state.on:     # if module powered on
       sleep(module.power_on_sleep)               # wait for module to stabilize
       module.message = '%s is on PTH switch %s' % (module.name,module.PTH_switch)
@@ -499,7 +511,7 @@ class PTH(SerialModule):
   def off(self,module=None): # open a PTH switch
     self.write('%s\r\n' % module.PTH_off_command) # open PTH switch for module
     module.PTH_message = self.read()              # capture PTH message
-    self.set_power_state(module=module)        # check module power off
+    self.set_power_state(module=module)           # check module power off
     if module.power_state == power_state.off:     # if module powered off
       sleep(module.power_off_sleep)               # wait for module to stabilize
       module.message = '%s is on PTH switch %s' % (module.name,module.PTH_switch)
@@ -519,42 +531,40 @@ class PTH(SerialModule):
 
   def poll_data(self):
     self.read() # clear output buffer
-    self.write('PRESS\r\n')  ; press  = re.search(r'PRESS\s+(\S+)',self.read()).group(1)
-    self.write('TEMP\r\n')   ; temp   = re.search(r'TEMP\s+(\S+)',self.read()).group(1)
-    self.write('HUMID\r\n')  ; humid  = re.search(r'HUMID\s+(\S+)',self.read()).group(1)
-    self.write('RAIN\r\n')   ; rain   = re.search(r'RAIN\s+(\S+)',self.read()).group(1)
-    self.write('SUPPLY\r\n') ; supply = re.search(r'SUPPLY\s+(\S+)',self.read()).group(1)
-    data_dict = {
-        'type':'PTH',
-        'timestamp':datetime.now(utc),
-        'PRESS':(press,'Pa'),
-        'TEMP':(temp,'K'),
-        'HUMID':(humid,'%'),
-        'RAIN':(rain,'enum'),
-        'SUPPLY':(supply,'V')}
+    data_dict = {'type':'PTH','timestamp':datetime.now(utc)}
+    for name,unit in (('PRESS','Pa'),('TEMP','K'),('HUMID','%'),('RAIN','enum'),('SUPPLY','V')):
+      self.write('%s\r\n' % name)
+      message = self.read()
+      if not self.communication_state == communication_state.error:
+        measure = re.search(r'%s\s+(\S+)' % name,message).group(1)
+        data_dict[name] = (measure,unit)
     return data_dict
 
   def poll_rain(self,module=None):
     self.read() # clear output buffer
     self.write('RAIN\r\n')
-    message = re.search(r'(RAIN\s+\S+)',self.read()).group(1) # read rain state
-    if len(message) != 0:
-      module.PTH_message = message
+    message = self.read() # read rain state
+    if not self.communication_state == communication_state.error:
+      trimmed_message = re.search(r'(RAIN\s+\S+)',message).group(1)
+      module.PTH_message = trimmed_message
       rain_datum = re.split(r'\s+',module.PTH_message)
-      self.set_rain_state(rain_datum,module=module)
+      self.set_rain_state(rain_datum[1],module=module)
     else:
-      pass # a call to self.read sets the communication_state flag, so we don't need to handle it here
+      self.set_rain_state('',module=module)
 
-  def set_rain_state(self,rain_datum,module=None):
-    if rain_datum[1] == 'D': # dry
+  def set_rain_state(self,state,module=None):
+    if state == 'D': # dry
       module.rain_state = rain_state.dry
       module.message = 'no rain: "%s"' % module.PTH_message
-    if rain_datum[1] == 'W': # wet
+    if state == 'W': # wet
       module.rain_state = rain_state.wet
       module.message = 'rain detected: "%s"' % module.PTH_message
-    if rain_datum[1] == 'X': # open or no rain monitor
+    if state == 'X': # open or no rain monitor
       module.rain_state = rain_state.open
       module.message = '%s open or no %s present: "%s"' % (module.name,module.name,module.PTH_message)
+    else: # unknown
+      module.rain_state = rain_state.unknown
+      module.message = '%s state unknown: "%s"' % (module.name,module.name,module.PTH_message)
 
 class Rain(PowerModule):
   '''rain module'''
@@ -621,25 +631,27 @@ class RPC(SerialModule):
     self.name = 'RPC module' # RPC module name
     self.conf_message = ''   # state message
     self.message = ''        # result message
+    # TODO: tune additional serial parameters
     super(RPC,self).__init__(self.buffer_size,'/dev/tts/1',baudrate=9600,timeout=1)
     self.set_conf_state()
 
   def set_conf_state(self):
+    self.write('\r') ; sleep(1)                 # prompt the RPC
     self.conf_message = self.read()             # init message
-    if re.search(r'BayTech',self.conf_message): # parse message for 'BayTech' string
+    if re.search(r'Circuit Breaker',self.conf_message): # parse message for 'Circuit Breaker'
       self.conf_state = conf_state.initialized  # module conf state
       self.message = 'RPC initialized.'
       self.message += '\nRPC message:\n"%s"' % self.conf_message
-    else: # not a BayTech RPC, no RPC present, or if RPC prints out a message, the message doesn't contain 'BayTech'
+    else: # not a BayTech RPC, no RPC present, or if RPC prints out a message, the message doesn't contain 'Circuit Breaker'
       self.conf_state = conf_state.error
       self.message = 'RPC did not initialize.'
       self.message += '\nRPC message:\n"%s"' % self.conf_message
 
   def on(self,module=None): # power on a RPC outlet
-    self.write('ON %d\r\n' % module.RPC_outlet)# power on RPC outlet for module
-    sleep(0.5) ; self.write('Y\r\n')           # wait 0.5 s and confirm power on
+    self.write('ON %d\r' % module.RPC_outlet)  # power on RPC outlet for module
+    sleep(0.5) ; self.write('Y\r')             # wait 0.5 s and confirm power on
     module.RPC_message = self.read()           # capture RPC message
-    self.set_power_state(module=module)      # check powered on
+    self.set_power_state(module=module)        # check powered on
     if module.power_state == power_state.on:   # if module powered on
       sleep(module.power_on_sleep)             # wait for module to stabilize
       module.message = '%s is on RPC outlet %s' % (module.name,module.RPC_outlet)
@@ -650,15 +662,15 @@ class RPC(SerialModule):
       module.message += '\nRPC message should contain: "%d)...Outlet %d  : On"' % (module.RPC_outlet,module.RPC_outlet)
 
   def off(self,module=None): # power off a RPC outlet
-    self.write('OFF %d\r\n' % module.RPC_outlet) # power off RPC outlet for module
-    sleep(0.5) ; self.write('Y\r\n')             # wait 0.5 s and confirm power off
-    module.RPC_message = self.read()             # capture RPC message
+    self.write('OFF %d\r' % module.RPC_outlet) # power off RPC outlet for module
+    sleep(0.5) ; self.write('Y\r')             # wait 0.5 s and confirm power off
+    module.RPC_message = self.read()           # capture RPC message
     self.set_power_state(module=module)        # check powered off
-    if module.power_state == power_state.off:    # if module powered off
-      sleep(module.power_off_sleep)              # wait for module to stabilize
+    if module.power_state == power_state.off:  # if module powered off
+      sleep(module.power_off_sleep)            # wait for module to stabilize
       module.message = '%s is on RPC outlet %s' % (module.name,module.RPC_outlet)
       module.message += '\nRPC message:\n"%s"' % module.RPC_message
-    else:                                        # module failed to power off
+    else:                                      # module failed to power off
       module.message = '%s is on RPC outlet %s' % (module.name,module.RPC_outlet)
       module.message += '\nRPC message:\n"%s"\n' % module.RPC_message
       module.message += '\nRPC message should contain: "%d)...Outlet %d  : On"' % (module.RPC_outlet,module.RPC_outlet)
@@ -1100,7 +1112,7 @@ class Control(object):
   # charger commands
   def init_charger(self):
     self.report('initializing charger modbus interface ... ')
-    self.charger = ChargeController()                                 # init charger
+    self.charger = Charger()                                          # init charger
     self.check_communication_state(module=self.charger)               # check write state
     self.check_conf_state(conf_state.initialized,module=self.charger) # check charger init state
 
@@ -1222,10 +1234,10 @@ class Control(object):
     self.check_communication_state(module=self.radiometer) # check write state
     self.check_conf_state(conf_state.initialized,module=self.radiometer)  # check radiometer conf state
 
-  def read_radiometer_data(self,run_times=None):
+  def read_radiometer_data(self):
     radiometer_datum = self.radiometer.read_data()
     self.check_communication_state(module=self.radiometer)
-    self.data.append(radiometer_datum=radiometer_datum,run_times=run_times)
+    self.data.append(radiometer_datum=radiometer_datum)
 
 class Daemon(Control):
   '''
@@ -1248,12 +1260,13 @@ class Daemon(Control):
     self.phase = phase.final
     self.report('done running\n',color=self.GRAY)
     if self.connected:
-      self.inform('daemon process unexpectedly disconnected\n',color=self.RED)
+      self.inform('daemon process has quit\n',color=self.RED)
+      self.write_socket('%d' % signal.finalize) # done
       self.connected = False
     '''
     since __del__ execution occurs when the python interpreter is
-    self-destructing, we will hazard issuing these commands to the PTH board
-    without checking whether they succeed or trigger any errors
+    self-destructing, we will hazard issuing these statements without checking
+    whether they succeed or trigger any errors
     '''
     try : self.PTH.off(module=self.heater) # power off heater module
     except : pass
@@ -1278,7 +1291,7 @@ class Daemon(Control):
     timepoint conditional is guaranteed to be true for all conditional blocks
     in the loop.  We set epsilon to be less than sleep time and ensure that
     sleep time - epsilon is longer than the time it takes to complete every
-    conditional block within the following while loop.
+    conditional block within the while loop.
 
     Each conditional tests whether the current time is within epsilon of a
     timepoint, where the timepoints are the divisions of a UTC day by the
@@ -1292,17 +1305,22 @@ class Daemon(Control):
       if self.socket.accept():                               # once every self.sleep_time s
         self.operator_communicate()
       if is_at_timepoint(now,timedelta(hours=2),epsilon):    # once every 2 h
+        self.test_run()
         self.write_data()
       if is_at_timepoint(now,timedelta(minutes=15),epsilon): # once every 15 m
         self.collect_charger_datum()
         self.collect_PTH_datum()
-      else:
-        sleep(self.sleep_time)
+      sleep(self.sleep_time)
 
   def final(self):
     self.phase = phase.final
     self.off_heater() # power off window heater
     self.off_rain()   # power off rain monitor
+
+  def test_run(self):
+    self.operator_init()
+    self.operator_run()
+    self.operator_final()
 
   def operator_communicate(self):
     signals,commands = self.read_socket() # read data from operator
@@ -1345,8 +1363,9 @@ class Daemon(Control):
   def operator_final(self):
     self.phase = phase.final
     self.off_shutter()          # close shutter
-    run_times = {'start':self.start_time,'stop':self.stop_time}
-    self.read_radiometer_data(run_times) # read radiometer data and append run times
+    self.data.append(start_datum={'timestamp':self.start_time,'type':'start'},
+        stop_datum={'timestamp':self.stop_time,'type':'stop'})
+    self.read_radiometer_data() # read radiometer data and append run times
     self.write_data()           # write data
     self.off_radiometer()       # power off radiometer
     self.off_inverter()         # power off inverter
