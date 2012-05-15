@@ -1,0 +1,82 @@
+[laser]
+vendor = Thermo Laser Science
+model = VSL-337ND-S
+serial = 
+supply = AC
+volts = 110-120
+hertz = 50-60
+amps = 1.5
+fuse = 1.6 A 250 V
+
+[radiometer]
+vendor = Laser Probe
+model = Rm-3700
+serial = 096-128-003
+supply = DC
+volts = 6-9
+amps = 2
+
+[probe]
+
+[RPC]
+vendor = BayTech
+model = RPC-2
+supply = AC
+max load = (15A,115V,60Hz)
+
+[radio]
+vendor = Laird Technologies
+model = ConnexLink 4790
+supply = DC
+volts = 7-18
+
+[SBC]
+vendor = Technologic Systems
+model = TS-7260
+PC104_extensions = TS-SER4
+supply = DC
+volts = 
+amps = 
+
+[PTH]
+vendor = Jeremy
+model = PTH
+supply = DC
+volts = 
+amps = 
+
+[inverter]
+vendor = Xantrex
+model = inverter 700 plus
+supply = DC
+volts = 12
+amps = 70
+output = (115 V,60 Hz)
+output_power = (700 W max 300 s,560 W continuous)
+
+[charger]
+vendor = MorningStar
+model = SS-MPPT-15L
+serial = 11020123
+
+[battery]
+vendor = C&D Technologies
+model = DCS-100L
+output = 12 V
+capacity = 83-100 AH
+float_charge = (13.5-13.8 VDC,25C)
+recharge = (14.4-14.8 VDC)
+
+[solar panel]
+vendor = Sharp
+model = ND-L3EJE
+serial = 
+max_power = 123.0 W
+open_circuit_volts = 21.3 V
+short_circuit_volts = 7.90 A
+max_power_volts = 17.2 V
+max_power_current = 7.16 A
+max_system_volts = 600 V
+max_bypass_diode = 15 A
+series_fuse = 15 A
+wiring = (Cu,14 AWG min,90C insulation min)
