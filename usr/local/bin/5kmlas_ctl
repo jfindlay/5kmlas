@@ -1221,11 +1221,16 @@ class Operator:
     '''
     # TODO: make sure /var/lock is mounted as ramfs on SBC USB drive
     self.lock = '/var/lock/5kmlas_operator' # location of process file lock
-    if os.path.isdir(self.lock):
-      raise OSError('laser_ctl operator process lock file, %s, exists and is a directory.' % self.lock)
-    os.remove(self.lock)
+    if os.path.exists(self.lock):
+      if os.path.isdir(self.lock):
+        raise OSError('laser_ctl operator process lock file, %s, exists and is a directory.' % self.lock)
+      raise OSError('laser_ctl operator process lock file, %s, exists.  If no other operator process is running, please remove this file.' % self.lock)
     lock = open(self.lock,'w')
     lock.close()
+
+  def __del__(self):
+    try : os.remove(self.lock)
+    except : pass
 
   def init(self,control):
     control.phase = phase.init
