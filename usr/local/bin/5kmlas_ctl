@@ -52,6 +52,7 @@
 #   rain sensor, heater, inverter, RPC, radiometer, shutter, laser
 
 import os,sys,re
+from subprocess import call
 from time import sleep
 from datetime import datetime,timedelta,tzinfo,time
 from optparse import OptionParser,OptionGroup
@@ -1175,6 +1176,7 @@ class Daemon:
   '''
 
   def __init__(self):
+    os.
 
   def init(self,control):
     control.phase = phase.init
@@ -1183,7 +1185,6 @@ class Daemon:
     control.init_PTH()     # init PTH board
     control.on_rain()      # power on rain monitor
     control.poll_rain()    # check rain state
-    control.on_heater()    # power on window heater
 
   def poll(self,control):
     control.phase = phase.run
@@ -1201,7 +1202,6 @@ class Daemon:
 
   def final(self,control):
     control.phase = phase.final
-    control.off_heater() # power off window heater
     control.off_rain()   # power off rain monitor
 
 class Operator:
@@ -1215,7 +1215,17 @@ class Operator:
   '''
 
   def __init__(self):
-    pass
+    '''
+    check presence of daemon lockfile.  If it exitst, then wait until daemon
+    process finishes before proceeding.
+    '''
+    # TODO: make sure /var/lock is mounted as ramfs on SBC USB drive
+    self.lock = '/var/lock/5kmlas_operator' # location of process file lock
+    if os.path.isdir(self.lock):
+      raise OSError('laser_ctl operator process lock file, %s, exists and is a directory.' % self.lock)
+    os.remove(self.lock)
+    lock = open(self.lock,'w')
+    lock.close()
 
   def init(self,control):
     control.phase = phase.init
@@ -1305,7 +1315,7 @@ def parse_opts():
 
   # handle run mode argument, default mode is operator
   if len(args) == 0:
-    args.append('operator')
+    args.append(run_mode.operator)
   elif len(args) == 1:
     if   args[0] == 'daemon-read'  : args[0] = run_mode.daemon ; args[1] = daemon_mode.read
     elif args[0] == 'daemon-write' : args[0] = run_mode.daemon ; args[1] = daemon_mode.write
@@ -1320,7 +1330,7 @@ def parse_opts():
       sys.exit(1)
   elif len(args) > 1:
     opt_parser.print_usage()
-    print opt_parser.expand_prog_name('%prog: please specify one or zero MODEs.  Use "%prog -h" for help.')
+    print opt_parser.expand_prog_name('%prog: please specify exactly one or zero MODEs.  Use "%prog -h" for help.')
     sys.exit(1)
 
   return opts,args
@@ -1333,10 +1343,8 @@ def main():
   if args[0] == run_mode.daemon: # daemon mode
     daemon = Daemon()
     daemon.init(control)
-    if args[1] == daemon_mode.read:
-      daemon.poll(control)
-    elif args[1] == daemon_mode.write:
-      daemon.poll(control)
+    daemon.poll(control)
+    if args[1] == daemon_mode.write:
       daemon.store(control)
       daemon.rsync(control)
     daemon.final(control)
@@ -1346,7 +1354,7 @@ def main():
     operator.run(control)
     operator.final(control)
   elif args[0] == run_mode.calibrator: # calibration mode
-    calibrator = Operator() # TODO: create special calibrator mode
+    calibrator = Operator() # TODO: create special calibration mode
     calibrator.init(control)
     calibrator.run(control)
     calibrator.final(control)
