@@ -4,24 +4,6 @@
 # findlay@cosmic.utah.edu
 
 # TODO:
-# - new schema: move all daemon polling operations to a cron function
-#   * interactive process connects operator directly with physical and logical
-#     modules
-#   * daemon process wakes up by cron every 15 minutes to poll state data
-#   * set /var/lock/{daemon|operator}-running files to prevent simultaneous
-#     running of daemon poll and operator program
-#   * each instance of daemon or operator will run once and write before
-#     terminating to a location in /tmp/data
-#   * if operator is initiated while daemon is running, operator process will
-#     wait to begin until after daemon process completes by checking presence
-#     of /var/lock/daemon-running
-#   * daemon gathers all data at the end of each UTC day, writes it to
-#     /mnt/data, and rsyncs it back to Middle Drum
-#   * daemon removes all /mnt/data files older than one month
-# - run data and non-run PTH data will be written onto the data USB storage
-#   (/mnt/data) as a DST bank.  It will then be transferred to Middle Drum,
-#   where it will be pooled into the regular data collection and processing
-#   streams as already implemented in Middle Drum software operations.
 # - develop rigorous and thorough hardware failure simulation routine
 # - replace color code with curses color code
 # - replace custom logging with python logging module
@@ -52,7 +34,6 @@
 #   rain sensor, heater, inverter, RPC, radiometer, shutter, laser
 
 import os,sys,re
-from subprocess import call
 from time import sleep
 from datetime import datetime,timedelta,tzinfo,time
 from optparse import OptionParser,OptionGroup
@@ -148,7 +129,11 @@ class Data:
   /mnt/data.  Each event datum is written in chronological order to the
   /mnt/data file that matches its timestamp.
   '''
-  # TODO: update
+  # TODO:
+  # write to /tmp/data before process terminates after the end of the UTC
+  # day, gather /tmp/data pieces, write to /mnt/data, then rsync to middle drum
+  # in store mode, ensure that past days have been processed in case that a
+  # calibrator mode was active when cron initiated the daemon-write process
   def __init__(self):
     self.tmp_store = '/tmp/data' # location of temporary data files
     self.store = '/mnt/data' # location of data files
@@ -793,7 +778,7 @@ class Laser(PowerModule):
 
 class Log:
   '''
-  provide printing functions and color
+  provide printing functions and color printing
   '''
   def __init__(self):
     pass
@@ -838,7 +823,7 @@ class Log:
 
   def inform(self,data,color=''):
     '''
-    write error information to sys.stdout even in quiet mode
+    write information to sys.stdout even in quiet mode
     '''
     self.printf(data,color=color)
 
@@ -860,9 +845,9 @@ log = Log()
 
 class Control:
   '''
-  abstract base class for software control modules daemon and operator
+  abstract base class for software control modules daemon and runner
 
-  The control module is an abstract base class for the daemon and operator
+  The control module is an abstract base class for the daemon and runner
   modules.  Together they wrap each serial communication to the physical
   modules in order to simplify and unify error traps.  Each call sets one or
   more associated states in the module.  The control module will take action
@@ -1165,20 +1150,75 @@ class Control:
     self.radiometer.close()
     log.report('done\n',color=log.GREEN)
 
-class Daemon:
+class Operator(object):
+  '''
+  abstract base class for Daemon,Runner,Calibrator subclasses.  Provides common
+  methods
+  '''
+
+  def __init__(self):
+    pass
+
+  def list_proc_cmds():
+    '''
+    queries the system for the invocations of all processes
+    '''
+    pids = [pid for pid in os.listdir('/proc') if pid.isdigit()]
+    cmdlines = []
+    for pid in pids:
+      f = open(os.path.join('/proc',pid,'cmdline'),'rb')
+      cmdlines.append(f.read())
+      f.close()
+    return cmdlines
+  
+  def find_instances():
+    '''
+    finds instances of laser_ctl in system process list
+    '''
+    instances = {'daemon-read':0,'daemon-write':0,'calibrator':0,'runner':0}
+    for cmd in list_proc_cmds():
+      if re.search(r'laser_ctl.*daemon-read',cmd) :    instances['daemon-read'] += 1
+      elif re.search(r'laser_ctl.*daemon-write',cmd) : instances['daemon-write'] += 1
+      elif re.search(r'laser_ctl.*calibrator',cmd) :   instances['calibrator'] += 1
+      elif re.search(r'laser_ctl.*runner',cmd) :       instances['runner'] += 1
+      elif re.search(r'laser_ctl',cmd) :               instances['runner'] += 1
+    return instances
+  
+class Daemon(Operator):
   '''
   5kmlas daemon process
 
   the daemon object interacts with the control module in a scripted manner.
-  When no operator or calibrator process is in session, it logs PTH and charger
+  When no runner or calibrator process is in session, it logs PTH and charger
   information infrequently onto /tmp/data.  Once daily, it also moves all data stored on
   /tmp/data to /mnt/data and rsyncs it to Middle Drum
   '''
 
-  def __init__(self):
-    os.
+  def __init__(self,daemon_mode):
+    '''
+    check to make sure that this process is the only laser_ctl process
+    '''
+    self.mode = daemon_mode
+    while True:
+      instances = self.find_instances()
+      if self.mode == daemon_mode.read:
+        if instances['daemon-read'] > 1: # this is a daemon-read process
+          raise OSError('%d `laser_ctl daemon-read` process(es) {is|are} running.  Only one instance of `laser_ctl daemon-{read|write}` should run at a time.\n' % instances['daemon-read'])
+        elif instances['daemon-write'] > 0:
+          raise OSError('%d `laser_ctl daemon-write` process(es) {is|are} running.  Only one instance of `laser_ctl daemon-{read|write}` should run at a time.\n' % instances['daemon-write'])
+      elif self.mode == daemon_mode.write:
+        if instances['daemon-read'] > 0:
+          raise OSError('%d `laser_ctl daemon-read` process(es) {is|are} running.  Only one instance of `laser_ctl daemon-{read|write}` should run at a time.\n' % instances['daemon-read'])
+        elif instances['daemon-write'] > 1: # this is a daemon-write process
+          raise OSError('%d `laser_ctl daemon-write` process(es) {is|are} running.  Only one instance of `laser_ctl daemon-{read|write}` should run at a time.\n' % instances['daemon-write'])
+      elif instances['calibrator'] > 0:
+        sys.exit(0) # do not poll hardware or process data when calibrating
+      elif instances['runner'] > 0:
+        sys.exit(0) # do not poll hardware or process data when running
+      else:
+        break # this is the only `laser_ctl` process running
 
-  def init(self,control):
+  def run(self,control):
     control.phase = phase.init
     control.init_data()    # init data structure
     control.init_charger() # init charger
@@ -1186,53 +1226,47 @@ class Daemon:
     control.on_rain()      # power on rain monitor
     control.poll_rain()    # check rain state
 
-  def poll(self,control):
     control.phase = phase.run
     control.collect_charger_datum()
     control.collect_PTH_datum()
     control.write_data()
+    if self.mode == daemon_mode.write:
+      control.store_data()
+      control.rsync_data()
 
-  def store(self,control):
-    control.phase = phase.run
-    control.store_data()
-
-  def rsync(self,control):
-    control.phase = phase.run
-    control.rsync_data()
-
-  def final(self,control):
     control.phase = phase.final
-    control.off_rain()   # power off rain monitor
+    control.off_rain()     # power off rain monitor
 
-class Operator:
+class Runner(Operator):
   '''
-  operate 5kmlas system
+  run 5kmlas system
 
-  Operator interfaces with the Control module, which handles state checking
-  and automatic shut down in case of error.  The operator object performs a
-  scripted cadence.  The operator process is initiated either from Middle Drum
-  or as part of a local calibration run.
+  Runner interfaces with the Control module, which handles state checking and
+  automatic shut down in case of error.  The runner object performs a
+  scripted routine.  It is initiated either from Middle Drum or as part of a
+  local calibration run.
   '''
 
   def __init__(self):
     '''
-    check presence of daemon lockfile.  If it exitst, then wait until daemon
-    process finishes before proceeding.
+    check to make sure that this process is the only laser_ctl process
     '''
-    # TODO: make sure /var/lock is mounted as ramfs on SBC USB drive
-    self.lock = '/var/lock/5kmlas_operator' # location of process file lock
-    if os.path.exists(self.lock):
-      if os.path.isdir(self.lock):
-        raise OSError('laser_ctl operator process lock file, %s, exists and is a directory.' % self.lock)
-      raise OSError('laser_ctl operator process lock file, %s, exists.  If no other operator process is running, please remove this file.' % self.lock)
-    lock = open(self.lock,'w')
-    lock.close()
+    while True:
+      instances = self.find_instances()
+      if instances['daemon-read'] > 0:
+        log.inform('A `laser_ctl daemon-read` process is running: waiting 5 s for it to finish.\n')
+        sleep(5)
+      elif instances['daemon-write'] > 0:
+        log.inform('A `laser_ctl daemon-write` process is running: waiting 5 s for it to finish.\n')
+        sleep(5)
+      elif instances['calibrator'] > 0:
+        raise OSError('%d `laser_ctl calibrator` process(es) {is|are} running.  Only one instance of `laser_ctl {runner|calibrator}` should run at a time.\n' % instances['calibrator'])
+      elif instances['runner'] > 1: # this is a runner process
+        raise OSError('%d `laser_ctl runner` process(es) {is|are} running.  Only one instance of `laser_ctl {runner|calibrator}` should run at a time.\n' % instances['runner'])
+      else:
+        break # this is the only `laser_ctl` process running
 
-  def __del__(self):
-    try : os.remove(self.lock)
-    except : pass
-
-  def init(self,control):
+  def run(self,control):
     control.phase = phase.init
     control.init_data()       # init data structure
     control.init_charger()    # init charger
@@ -1246,24 +1280,22 @@ class Operator:
     control.init_radiometer() # init radiometer
     control.on_shutter()      # power on shutter
 
-  def run(self,control):
     control.phase = phase.run
     log.report('collecting data\n',color=log.GRAY)
     five_minutes = timedelta(seconds=10)
     now = self.start_time = datetime.now(utc)     # record laser on time
-    control.on_laser()                       # power on laser
+    control.on_laser()                            # power on laser
     while (now < self.start_time + five_minutes): # run for 5 m
       control.collect_charger_datum()
       control.collect_PTH_datum()
       sleep(5)                                    # collect charger,PTH data every 5 s
       now = datetime.now(utc)                     # new timestamp
-    control.off_laser()                      # power off laser
-    control.collect_charger_datum()          # collect final charger datum
-    control.collect_PTH_datum()              # collect final PTH datum
-    control.stop_time = datetime.now(utc)    # record laser off time
+    control.off_laser()                           # power off laser
+    control.collect_charger_datum()               # collect final charger datum
+    control.collect_PTH_datum()                   # collect final PTH datum
+    control.stop_time = datetime.now(utc)         # record laser off time
     log.report('done collecting\n',color=log.GRAY)
 
-  def final(self,control):
     control.phase = phase.final
     control.off_shutter()          # close shutter
     control.data.append(start_datum={'timestamp':self.start_time,'type':'start'},
@@ -1277,6 +1309,9 @@ class Operator:
     # print all data when verbose
     log.detail('%s\n' % control.data)
 
+class Calibrator(Operator):
+  pass # TODO: implement
+
 # main #########################################################################
 
 def parse_opts():
@@ -1284,7 +1319,7 @@ def parse_opts():
   handle invocation options and arguments
   '''
   usage = 'Usage: %prog [OPTIONS] MODE'
-  description = 'Run 5 km laser calibration system.\nMODE is any of "operate", "operator", or "run" - Middle Drum operations [default], "calibrate" or "calibrator" - calibrate 5kmlas, "daemon-read" - poll PTH and charger data, or "daemon-write" - collate, store, and rsync data to Middle Drum.  "daemon-{read|write}" modes should only be invoked by cron.'
+  description = 'Run 5 km laser calibration system.\nMODE is any of "runner" - Middle Drum operations [default], "calibrator" - calibrate 5kmlas, "daemon-read" - poll PTH and charger data, or "daemon-write" - collate, store, and rsync data to Middle Drum.  "daemon-{read|write}" modes should only be invoked by cron.'
   opt_parser = OptionParser(usage=usage,description=description,version='%prog-0.6.5')
   opt_parser.add_option('-c','--color',action='store_const',const=True,
       default=True,help='print messages in color [default]')
@@ -1318,17 +1353,14 @@ def parse_opts():
   if not opts.verbose and not opts.normal and not opts.quiet:
     opts.normal = True
 
-  # handle run mode argument, default mode is operator
+  # handle run mode argument, default mode is runner
   if len(args) == 0:
-    args.append(run_mode.operator)
+    args.append(run_mode.runner)
   elif len(args) == 1:
     if   args[0] == 'daemon-read'  : args[0] = run_mode.daemon ; args[1] = daemon_mode.read
     elif args[0] == 'daemon-write' : args[0] = run_mode.daemon ; args[1] = daemon_mode.write
-    elif args[0] == 'operator'     : args[0] = run_mode.operator
-    elif args[0] == 'operate'      : args[0] = run_mode.operator
-    elif args[0] == 'run'          : args[0] = run_mode.operator
+    elif args[0] == 'runner'       : args[0] = run_mode.runner
     elif args[0] == 'calibrator'   : args[0] = run_mode.calibrator
-    elif args[0] == 'calibrate'    : args[0] = run_mode.calibrator
     else:
       opt_parser.print_usage()
       print opt_parser.expand_prog_name('%%prog: invalid MODE: %s.  Use "%%prog -h" for help.' % args[0])
@@ -1346,23 +1378,14 @@ def main():
   log = Log(opts)     # init logger
   control = Control() # init control module
   if args[0] == run_mode.daemon: # daemon mode
-    daemon = Daemon()
-    daemon.init(control)
-    daemon.poll(control)
-    if args[1] == daemon_mode.write:
-      daemon.store(control)
-      daemon.rsync(control)
-    daemon.final(control)
-  elif args[0] == run_mode.operator: # operation mode
-    operator = Operator()
-    operator.init(control)
-    operator.run(control)
-    operator.final(control)
+    daemon = Daemon(args[1])
+    daemon.run(control)
+  elif args[0] == run_mode.runner: # running mode
+    runner = Runner()
+    runner.run(control)
   elif args[0] == run_mode.calibrator: # calibration mode
-    calibrator = Operator() # TODO: create special calibration mode
-    calibrator.init(control)
+    calibrator = Runner() # TODO: create calibration mode
     calibrator.run(control)
-    calibrator.final(control)
 
 if __name__ == '__main__':
   try:
