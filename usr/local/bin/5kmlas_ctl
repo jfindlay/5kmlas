@@ -33,10 +33,12 @@
 # modules powered on by SBC controlling program:
 #   rain sensor, heater, inverter, RPC, radiometer, shutter, laser
 
-import os,sys,re
+import os,sys,re,gzip
+from subprocess import call
 from time import sleep
 from datetime import datetime,timedelta,tzinfo,time
 from optparse import OptionParser,OptionGroup
+from pprint import saferepr,isreadable
 from serial import Serial,SerialException,SerialTimeoutException
 from pymodbus.client.sync import ModbusSerialClient as ModbusClient
 from pymodbus.device import ModbusDeviceIdentification
@@ -124,64 +126,130 @@ utc = UTC()
 
 class Data:
   '''
-  data is written to data part files in /mnt/data with one part per UTC day.
-  Data events are written to /tmp/data where they are buffered until written to
-  /mnt/data.  Each event datum is written in chronological order to the
-  /mnt/data file that matches its timestamp.
+  data is written to data part files in self.store with one part per UTC day.
+  Data events are written to self.temp where they are buffered until written to
+  self.store.  Each event datum is written in chronological order to the
+  self.store file that matches its timestamp.
   '''
   # TODO:
-  # write to /tmp/data before process terminates after the end of the UTC
-  # day, gather /tmp/data pieces, write to /mnt/data, then rsync to middle drum
-  # in store mode, ensure that past days have been processed in case that a
-  # calibrator mode was active when cron initiated the daemon-write process
+  # ensure that past days have been processed in case that a calibrator process
+  # was active when cron initiated the daemon-write process
   def __init__(self):
-    self.tmp_store = '/tmp/data' # location of temporary data files
-    self.store = '/mnt/data' # location of data files
-    if not os.path.exists(self.storage_location):
-      os.makedirs(self.storage_location)
-    if not os.path.isdir(self.storage_location):
-      raise OSError('data storage location is not a directory')
-    self.buffer = []
+    self.temp = '/tmp/data'  # location of temporary data storage files
+    self.store = '/mnt/data' # location of data storage files
+    self.temp_names = []     # list of the names of temporary files
+    self.store_files = {}    # dictionary of storage files
+    self._ensure_dirs()      # ensure self.temp and self.store
+    self.temp_buffer = []    # buffer of data to be written into self.tmp datum files
+    self.store_buffer = []   # buffer of data to be written into self.store day files
+    self.gzip_level = 9      # gzip compression level
+    self.store_time = timedelta(days=1024) # age of stored data files before they're removed
     self.zero_datetime = datetime.utcfromtimestamp(0) # 1970-01-01 00:00:00.000000 UTC
     self.zero_time = time(0,0,0,0,utc) # 00:00:00.000000 UTC
 
   def __del__(self):
+    '''
+    try to save the data
+    '''
     try : self.write()
     except : pass
 
   def append(self,*args,**kwargs):
+    '''
+    collect datum kwargs into data buffer
+    '''
     for kwarg in kwargs:
-      self.buffer.append(kwargs[kwarg])
+      self.temp_buffer.append(kwargs[kwarg])
 
   def write(self):
-    # TODO:
-    # load objects from DST.py and write data structure into DST file.  The
-    # format of the DST file will be a heterogeneous stream with one part per
-    # UTC day.  Once data has been written to storage, clear all data from
-    # memory
-    #
-    # for now, just pprint the data to one ASCII file per UTC day
-    self.files = {}
-    from pprint import pprint
-    self.buffer.sort(key=lambda item : item['timestamp']) # sort data by timestamp
-    for item in self.buffer:
+    '''
+    write data to temporary storage location
+    '''
+    self.temp_buffer.sort(key=lambda datum : datum['timestamp']) # sort data by timestamp
+    for datum in self.temp_buffer:
+      f_name = os.path.join(self.temp,'%s.%s' % (datum['type'],datum['timestamp']))
+      f = open(f_name,'w')    # open file
+      f.write(saferepr(item)) # write item
+      f.close()               # close file
+    del self.temp_buffer[:]   # clear data buffer
+
+  def store(self):
+    '''
+    collate data from the temporary data files into one gzipped DST file per
+    UTC day in self.store and delete temporary data files once they've been
+    collected into the corresponding day file
+    '''
+    # TODO: write data in DST 5kmlas bank format
+    self._read_temp_data() # read temp file contents into self.store_buffer
+    self.store_buffer.sort(key=lambda datum : datum['timestamp']) # sort data by timestamp
+    for datum in self.store_buffer:
       # while iterating over data, instantiate necessary file objects
-      if not item['timestamp'] in self.files.keys():
-        self.files[item['timestamp']] = self._get_file(item['timestamp'])
-      f = self.files[item['timestamp']]                   # current file
-      pprint(item,f,indent=2,width=160)                   # write item
-      f.flush() ; os.fsync(f.fileno())                    # flush buffer out to file
-    self._clear()
+      if not item['timestamp'] in self.store_files.keys():
+        self.store_files[item['timestamp']] = self._get_store_file(item['timestamp'])
+      f = self.store_files[item['timestamp']] # current file
+      f.write('%s\n' % saferepr(item))        # write item
+      f.flush() ; os.fsync(f.fileno())        # flush buffer out to file
+    for timestamp in self.store_files.keys():
+      self.store_files[timestamp].close()     # close file objects
+    del self.store_buffer[:]                  # clear store buffer
+    self._remove_temp_data()                  # clear temp data files
 
-  def _get_file(self,timestamp):
-    date = datetime.combine(timestamp,self.zero_time).date()
-    return file(os.path.join(self.storage_location,'%s' % date),'a')
+  def rsync(self):
+    '''
+    rsync self.store files to Middle Drum and remove old data files in
+    self.store
+    '''
+    # TODO: setup ssh keys
+    for f in self.store_files:
+      call(('/usr/bin/rsync','-q',self.store,'tamember@<Middle_Drum_computer_name_here>:</path/to/rsync/dir/here/>'))
+    # TODO: 
 
-  def _clear(self):
-    for timestamp in self.files.keys():
-      self.files[timestamp].close() # close file objects
-    del self.files                  # remove file object container
-    del self.buffer[:]              # clear data buffer
+  def _ensure_dirs(self):
+    '''
+    ensure that self.temp and self.store exist and are directories
+    '''
+    if not os.path.exists(self.temp):
+      os.makedirs(self.temp)
+    if not os.path.isdir(self.temp):
+      raise OSError('Data temporary storage, %s, location is not a directory.' % self.temp)
+    if not os.path.exists(self.store):
+      os.makedirs(self.store)
+    if not os.path.isdir(self.store):
+      raise OSError('Data storage location,%s, is not a directory.' % self.store)
+
+  def _read_temp_data(self):
+    '''
+    collect data stored in self.temp
+    '''
+    self.temp_names = [f for f in os.listdir(self.temp) if f.isfile()]
+    for f_name in self.temp_names:
+      f = open(f_name,'r')                     # open datum file
+      f_cont = f.read()                        # read datum file
+      f.close()                                # close datum file
+      if isreadable(f_cont):                   # check readability of contents
+        self.store_buffer.append(eval(f_cont)) # append contents to store_buffer
+      else:
+        raise SyntaxError('Cannot eval() datum, %s.' % f_cont)
+
+  def _remove_temp_data(self):
+    '''
+    delete temporary data files
+    '''
+    for f_name in self.temp_names:
+      os.remove(f_name)
+
+  def _get_store_file(self,timestamp):
+    '''
+    open one gzipped storage file per the UTC day inferred by timestamp.  The
+    particular files opened and used are determined by the timestamps of the
+    data to be written
+    '''
+    date = datetime.combine(timestamp,self.zero_time).date() # date timestamp
+    f_name = os.path.join(self.storage_location,'%s' % date) # file name
+    if os.path.isfile(f_name):                               # check if file already exists as a regular file
+      return gzip.open(f_name,'a',self.gzip_level)           # open as gzipped file
+    else:                                                    # file exists and is not a regular file
+      raise OSError('Data storage file, %s, is not a regular file.' % f_name)
 
 # module abstract base classes #################################################
 
@@ -995,7 +1063,7 @@ class Control:
       log.detail('done\n',color=log.GREEN)
 
   def store_data(self):
-    pass # TODO: collect /tmp/data into /mount/data single DST file per UTC day
+    pass # TODO: collect self.temp into /mount/data single DST file per UTC day
 
   def rsync_data(self):
     pass # TODO: rsync /mount/data file(s) to Middle Drum over PPP connection
@@ -1170,7 +1238,7 @@ class Operator(object):
       cmdlines.append(f.read())
       f.close()
     return cmdlines
-  
+
   def find_instances():
     '''
     finds instances of laser_ctl in system process list
@@ -1183,15 +1251,15 @@ class Operator(object):
       elif re.search(r'laser_ctl.*runner',cmd) :       instances['runner'] += 1
       elif re.search(r'laser_ctl',cmd) :               instances['runner'] += 1
     return instances
-  
+
 class Daemon(Operator):
   '''
   5kmlas daemon process
 
   the daemon object interacts with the control module in a scripted manner.
   When no runner or calibrator process is in session, it logs PTH and charger
-  information infrequently onto /tmp/data.  Once daily, it also moves all data stored on
-  /tmp/data to /mnt/data and rsyncs it to Middle Drum
+  information infrequently temporary data storage.  Once daily, it also moves
+  all data stored in temp storage to data store and rsyncs it to Middle Drum
   '''
 
   def __init__(self,daemon_mode):
@@ -1199,24 +1267,21 @@ class Daemon(Operator):
     check to make sure that this process is the only laser_ctl process
     '''
     self.mode = daemon_mode
-    while True:
-      instances = self.find_instances()
-      if self.mode == daemon_mode.read:
-        if instances['daemon-read'] > 1: # this is a daemon-read process
-          raise OSError('%d `laser_ctl daemon-read` process(es) {is|are} running.  Only one instance of `laser_ctl daemon-{read|write}` should run at a time.\n' % instances['daemon-read'])
-        elif instances['daemon-write'] > 0:
-          raise OSError('%d `laser_ctl daemon-write` process(es) {is|are} running.  Only one instance of `laser_ctl daemon-{read|write}` should run at a time.\n' % instances['daemon-write'])
+    instances = self.find_instances()
+    if instances['calibrator'] > 0:
+      sys.exit(0) # do not poll hardware or process data when calibrating
+    if instances['runner'] > 0:
+      sys.exit(0) # do not poll hardware or process data when running
+    if instances['daemon-read'] > 0:
+      if instances['daemon-read'] > 1 and self.mode == daemon_mode.read:
+        raise OSError('%d `laser_ctl daemon-read` process(es) {is|are} running.  Only one instance of `laser_ctl daemon-{read|write}` should run at a time.' % instances['daemon-read'])
       elif self.mode == daemon_mode.write:
-        if instances['daemon-read'] > 0:
-          raise OSError('%d `laser_ctl daemon-read` process(es) {is|are} running.  Only one instance of `laser_ctl daemon-{read|write}` should run at a time.\n' % instances['daemon-read'])
-        elif instances['daemon-write'] > 1: # this is a daemon-write process
-          raise OSError('%d `laser_ctl daemon-write` process(es) {is|are} running.  Only one instance of `laser_ctl daemon-{read|write}` should run at a time.\n' % instances['daemon-write'])
-      elif instances['calibrator'] > 0:
-        sys.exit(0) # do not poll hardware or process data when calibrating
-      elif instances['runner'] > 0:
-        sys.exit(0) # do not poll hardware or process data when running
-      else:
-        break # this is the only `laser_ctl` process running
+        raise OSError('%d `laser_ctl daemon-read` process(es) {is|are} running.  Only one instance of `laser_ctl daemon-{read|write}` should run at a time.' % instances['daemon-read'])
+    if instances['daemon-write'] > 0:
+      if instances['daemon-write'] > 1 and self.mode == daemon_mode.write:
+        raise OSError('%d `laser_ctl daemon-write` process(es) {is|are} running.  Only one instance of `laser_ctl daemon-{read|write}` should run at a time.' % instances['daemon-write'])
+      elif self.mode == daemon_mode.read:
+        raise OSError('%d `laser_ctl daemon-write` process(es) {is|are} running.  Only one instance of `laser_ctl daemon-{read|write}` should run at a time.' % instances['daemon-write'])
 
   def run(self,control):
     control.phase = phase.init
@@ -1227,10 +1292,11 @@ class Daemon(Operator):
     control.poll_rain()    # check rain state
 
     control.phase = phase.run
-    control.collect_charger_datum()
-    control.collect_PTH_datum()
-    control.write_data()
-    if self.mode == daemon_mode.write:
+    if self.mode == daemon_mode.read: # poll data
+      control.collect_charger_datum()
+      control.collect_PTH_datum()
+      control.write_data()
+    if self.mode == daemon_mode.write: # collate data, rsync to Middle Drum
       control.store_data()
       control.rsync_data()
 
