@@ -131,23 +131,23 @@ utc = UTC()
 
 class Data:
   '''
-  data is written to data part files in self.store with one part per UTC day.
-  Data events are written to self.temp where they are buffered until written to
-  self.store.  Each event datum is written in chronological order to the
-  self.store file that matches its timestamp.
+  Data events are written to self.temp_dir where they are buffered until
+  written to self.store_dir.  Data is written to files in self.store_dir with
+  one file per UTC day.  Each event datum is written in chronological order to
+  the storage file that matches its timestamp.
   '''
   # TODO:
   # ensure that past days have been processed in case that a calibrator process
   # was active when cron initiated the daemon-write process
   def __init__(self):
-    self.temp = '/tmp/data'  # location of temporary data storage files
-    self.store = '/mnt/data' # location of data storage files
-    self.temp_names = []     # list of the names of temporary files
-    self.store_files = {}    # dictionary of storage files
-    self._ensure_dirs()      # ensure self.temp and self.store
-    self.temp_buffer = []    # buffer of data to be written into self.tmp datum files
-    self.store_buffer = []   # buffer of data to be written into self.store day files
-    self.gzip_level = 9      # gzip compression level
+    self.temp_dir = '/tmp/data'  # location of temporary data storage files
+    self.store_dir = '/tmp/store' # location of data storage files
+    self._ensure_dirs()          # ensure self.temp_dir and self.store_dir
+    self.temp_names = []         # list of the names of temporary files
+    self.store_files = {}        # dictionary of storage files
+    self.temp_buffer = []        # buffer of data to be written into self.tmp datum files
+    self.store_buffer = []       # buffer of data to be written into self.store_dir day files
+    self.gzip_level = 9          # gzip compression level
     self.store_time = timedelta(days=1024) # age of stored data files before they're removed
     self.zero_datetime = datetime.utcfromtimestamp(0) # 1970-01-01 00:00:00.000000 UTC
     self.zero_time = time(0,0,0,0,utc) # 00:00:00.000000 UTC
@@ -172,7 +172,7 @@ class Data:
     '''
     self.temp_buffer.sort(key=lambda datum : datum['timestamp']) # sort data by timestamp
     for datum in self.temp_buffer:
-      f_name = os.path.join(self.temp,'%s.%s' % (datum['type'],datum['timestamp']))
+      f_name = os.path.join(self.temp_dir,'%s.%s' % (datum['type'],datum['timestamp']))
       f = open(f_name,'w')     # open file
       f.write(saferepr(datum)) # write datum
       f.close()                # close file
@@ -181,7 +181,7 @@ class Data:
   def store(self):
     '''
     collate data from the temporary data files into one gzipped DST file per
-    UTC day in self.store and delete temporary data files once they've been
+    UTC day in self.store_dir and delete temporary data files once they've been
     collected into the corresponding day file
     '''
     # TODO: write data in DST 5kmlas bank format
@@ -197,42 +197,44 @@ class Data:
     for timestamp in self.store_files.keys():
       self.store_files[timestamp].close()      # close file objects
     del self.store_buffer[:]                   # clear store buffer
-    self._remove_temp_data()                   # clear temp data files
+    #self._remove_temp_data()                   # clear temp data files
 
   def rsync(self):
     '''
-    rsync self.store files to Middle Drum and remove old data files in
-    self.store
+    rsync self.store_dir files during calibrator process and remove old data
+    files in self.store_dir
     '''
+    # TODO: the calibration run user should probably do this manually.  The SBC
+    # has a DHCP server and I can serve the files over HTTP
     # TODO: setup ssh keys
     for f in self.store_files:
-      call(('/usr/bin/rsync','-q',self.store,'tamember@<Middle_Drum_computer_name_here>:</path/to/rsync/dir/here/>'))
+      call(('/usr/bin/rsync','-q',self.store_dir,'tamember@<computer_name_here>:</path/to/rsync/dir/here/>'))
     # TODO: remove old data files
 
   def _ensure_dirs(self):
     '''
-    ensure that self.temp and self.store exist and are directories
+    ensure that self.temp_dir and self.store_dir exist and are directories
     '''
-    if not os.path.exists(self.temp):
-      os.makedirs(self.temp)
-    if not os.path.isdir(self.temp):
-      raise OSError('Data temporary storage, %s, location is not a directory.' % self.temp)
-    if not os.path.exists(self.store):
-      os.makedirs(self.store)
-    if not os.path.isdir(self.store):
-      raise OSError('Data storage location,%s, is not a directory.' % self.store)
+    if not os.path.exists(self.temp_dir):
+      os.makedirs(self.temp_dir)
+    if not os.path.isdir(self.temp_dir):
+      raise OSError('Data temporary storage, %s, location is not a directory.' % self.temp_dir)
+    if not os.path.exists(self.store_dir):
+      os.makedirs(self.store_dir)
+    if not os.path.isdir(self.store_dir):
+      raise OSError('Data storage location,%s, is not a directory.' % self.store_dir)
 
   def _read_temp_data(self):
     '''
-    collect data stored in self.temp
+    collect data stored in self.temp_dir
     '''
-    self.temp_names = [f for f in os.listdir(self.temp) if f.isfile()]
+    self.temp_names = [f for f in os.listdir(self.temp_dir) if os.path.isfile(os.path.join(self.temp_dir,f))]
     for f_name in self.temp_names:
-      f = open(f_name,'r')                     # open datum file
-      f_cont = f.read()                        # read datum file
-      f.close()                                # close datum file
-      if isreadable(f_cont):                   # check readability of contents
-        self.store_buffer.append(eval(f_cont)) # append contents to store_buffer
+      f = open(os.path.join(self.temp_dir,f_name),'r') # open datum file
+      f_cont = f.read()                                # read datum file
+      f.close()                                        # close datum file
+      if isreadable(f_cont) and len(f_cont) > 0:       # check readability of contents
+        self.store_buffer.append(eval(f_cont,{'UTC':utc,'datetime.datetime':datetime})) # append contents to store_buffer
       else:
         raise SyntaxError('Cannot eval() datum, %s.' % f_cont)
 
@@ -249,11 +251,11 @@ class Data:
     particular files opened and used are determined by the timestamps of the
     data to be written
     '''
-    date = datetime.combine(timestamp,self.zero_time).date() # date timestamp
-    f_name = os.path.join(self.storage_location,'%s' % date) # file name
-    if os.path.isfile(f_name):                               # check if file already exists as a regular file
-      return gzip.open(f_name,'a',self.gzip_level)           # open as gzipped file
-    else:                                                    # file exists and is not a regular file
+    date = datetime.combine(timestamp,self.zero_time).date()    # date timestamp
+    f_name = os.path.join(self.storage_location,'%s.gz' % date) # file name
+    if os.path.isfile(f_name):                                  # check if file already exists as a regular file
+      return gzip.open(f_name,'a',self.gzip_level)              # open as gzipped file
+    else:                                                       # file exists and is not a regular file
       raise OSError('Data storage file, %s, is not a regular file.' % f_name)
 
 # module abstract base classes #################################################
@@ -921,10 +923,9 @@ log = Log()
 
 class Control:
   '''
-  abstract base class for software control modules daemon and runner
+  software control module
 
-  The control module is an abstract base class for the daemon and runner
-  modules.  Together they wrap each serial communication to the physical
+  The control module wraps each serial/modbus communication to the physical
   modules in order to simplify and unify error traps.  Each call sets one or
   more associated states in the module.  The control module will take action
   upon each setting of state: either proceed normally or try to return the
@@ -938,11 +939,11 @@ class Control:
     itself that all problems will originate with a hardware failure or
     misconfiguration and that the firmware will report it.
   - The hardware modules will fail only at the time of a state change or a
-    serial write
-  If any of the serial devices (PTH,RPC,radiometer) fail on the negotiation of
-  the serial connection or when any data is sent to them, pyserial will handle
-  and report those errors and the control module will intercept those errors
-  and shutdown as appropriate.
+    serial read/write
+  If the modbus module (charger) or any of the serial devices
+  (PTH,RPC,radiometer) fail on the negotiation of the serial connection or when
+  any data is sent/received to/from them, pymodbus/pyserial will handle and
+  report those errors, which will be intercepted by the control module.
 
   The control process has three phases: init, run, and final.  Depending on the
   phase and module, the control module may fail in a different manner.
@@ -982,11 +983,11 @@ class Control:
     elif module.conf_state == conf_state.undefined or module.conf_state == conf_state.finalized:
       log.inform('failed\n',color=log.RED)
       log.inform('%s\n' % module.message)
-      self.emergency_shutdown()
+      self.shutdown()
     elif module.conf_state == conf_state.error:
       log.inform('error\n',color=log.RED)
       log.inform('%s\n' % module.message)
-      self.emergency_shutdown()
+      self.shutdown()
 
   def check_power_state(self,desired_state,module=None):
     if module.power_state == desired_state:
@@ -995,7 +996,7 @@ class Control:
     else:
       log.inform('failed\n',color=log.RED)
       log.inform('%s\n' % module.message)
-      self.emergency_shutdown(module_no_off=module)
+      self.shutdown(module_no_off=module)
 
   def check_rain_state(self,module=None):
     if module.rain_state == rain_state.dry:
@@ -1005,23 +1006,23 @@ class Control:
       log.report('wet\n',color=log.BLUE)
       log.report('%s\n' % module.message)
       if self.phase != phase.final:
-        self.emergency_shutdown()
+        self.shutdown()
     elif module.rain_state == rain_state.open:
       log.report('open\n',color=log.YELLOW)
       log.report('%s\n' % module.message)
       if self.phase != phase.final:
-        #self.emergency_shutdown() # TODO: get rain sensor from Jeremy
+        #self.shutdown() # TODO: get rain sensor from Jeremy
         self.off_rain()
 
   def check_communication_state(self,module=None):
     if module.communication_state == communication_state.success:
       return # serial module successfully written to or read from
     elif module.communication_state == communication_state.error:
-      self.emergency_shutdown()
+      self.shutdown()
     elif module.communication_state == communication_state.timeout:
-      self.emergency_shutdown()
+      self.shutdown()
 
-  def emergency_shutdown(self,module_no_off=None):
+  def shutdown(self,module_no_off=None):
     '''
     To avoid an open loop, we will not try to final or power off any module
     that won't do so.
@@ -1065,16 +1066,23 @@ class Control:
     else:
       log.detail('writing data ... ')
     self.data.write() # format and save data, then clear data buffer
+    # TODO: check write state
     if self.phase == phase.final:
       log.report('done\n',color=log.GREEN)
     else:
       log.detail('done\n',color=log.GREEN)
 
   def store_data(self):
-    pass # TODO: collect self.temp into /mount/data single DST file per UTC day
+    log.report('storing data ... ')
+    self.data.store()
+    # TODO: check store state
+    log.report('done\n',color=log.GREEN)
 
   def rsync_data(self):
-    pass # TODO: rsync /mount/data file(s) to Middle Drum over PPP connection
+    log.report('storing data ... ')
+    self.data.rsync()
+    # TODO: check rsync state
+    log.report('done\n',color=log.GREEN)
 
   # charger commands
   def init_charger(self):
@@ -1105,9 +1113,9 @@ class Control:
   def on_rain(self):
     log.report('powering on rain monitor ... ')
     self.rain = Rain()
-    self.PTH.on(module=self.rain)           # power on rain monitor module
-    self.check_communication_state(module=self.PTH) # check write state
-    self.check_power_state(power_state.on,module=self.rain)   # check rain monitor power state
+    self.PTH.on(module=self.rain)                           # power on rain monitor module
+    self.check_communication_state(module=self.PTH)         # check write state
+    self.check_power_state(power_state.on,module=self.rain) # check rain monitor power state
 
   def off_rain(self):
     log.report('powering off rain monitor ... ')
@@ -1275,7 +1283,6 @@ class Daemon(Operator):
     check to make sure that this process is the only 5kmlas_ctl process
     '''
     self.mode = mode
-    print self.mode,daemon_mode.read
     instances = self._find_instances()
     if instances['calibrator'] > 0:
       sys.exit(0) # do not poll hardware or process data when calibrating
@@ -1293,28 +1300,28 @@ class Daemon(Operator):
         raise OSError('%d `5kmlas_ctl daemon-write` process(es) {is|are} running.  Only one instance of `5kmlas_ctl daemon-{read|write}` should run at a time.' % instances['daemon-write'])
 
   def run(self,control):
-    try: # try to emergency shutdown in case of any error
+#    try: # try to emergency shutdown in case of any error
       control.phase = phase.init
-      control.init_data()    # init data structure
-      control.init_charger() # init charger
-      control.init_PTH()     # init PTH board
-      control.on_rain()      # power on rain monitor
-      control.poll_rain()    # check rain state
-
-      control.phase = phase.run
-      if self.mode == daemon_mode.read: # poll data
-        control.collect_charger_datum()
-        control.collect_PTH_datum()
-        control.write_data()
-      if self.mode == daemon_mode.write: # collate data, rsync to Middle Drum
-        control.store_data()
-        control.rsync_data()
-
-      control.phase = phase.final
-      control.off_rain()     # power off rain monitor
-    except Exception,exception:
-      log.inform('5kmlas_ctl encountered an error: %s.\n' % exception,color=log.RED)
-      control.emergency_shutdown()
+      control.init_data()                # init data structure
+      if self.mode == daemon_mode.read:  # poll data
+        control.init_charger()           # init charger
+        control.init_PTH()               # init PTH board
+        control.on_rain()                # power on rain monitor
+        control.poll_rain()              # check rain state
+        control.phase = phase.run
+        control.collect_charger_datum()  # collect charger,
+        control.collect_PTH_datum()      # PTH data
+        control.write_data()             # write data
+        control.phase = phase.final
+        control.off_rain()               # power off rain monitor
+        control.poll_rain()              # check rain state
+      if self.mode == daemon_mode.write: # collate data into UTC day files
+        control.phase = phase.run
+        control.store_data()             # collate and store data
+        control.phase = phase.final      # nothing is finalized in daemon-write mode
+#    except Exception,exception:
+#      log.inform('5kmlas_ctl encountered an error: %s.\n' % exception,color=log.RED)
+#      control.shutdown()
 
 class Runner(Operator):
   '''
@@ -1391,7 +1398,7 @@ class Runner(Operator):
       log.detail('%s\n' % control.data)
 #    except Exception,exception:
 #      log.inform('5kmlas_ctl encountered an error: %s.\n' % exception,color=log.RED)
-#      control.emergency_shutdown()
+#      control.shutdown()
 
 class Calibrator(Operator):
   pass # TODO: implement
