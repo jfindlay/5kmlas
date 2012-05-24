@@ -8,9 +8,11 @@
 # - replace color code with curses color code
 # - replace custom logging with python logging module
 # - convert remaining MPPT bitfields and enums
-# - remote capture of data should happen during calibration run since Middle Drum operates off-grid, therefore, discontinuously
+# - remote capture of data should happen during calibration run since Middle
+#   Drum operates off-grid, therefore, discontinuously
 # - create unprivileged user to run 5kmlas_ctl runner/calibrator
 # - mount rootfs on SBC readonly in chrooted or pivot_rooted USB system
+# - mount root of USB system readonly
 # - ensure cron is started in USB system during bootup
 
 # A module is a discrete, active component of the 5kmlas system.  It consists
@@ -38,10 +40,14 @@
 # modules powered on by SBC controlling program:
 #   rain sensor, heater, inverter, RPC, radiometer, shutter, laser
 
-import os,sys,re,gzip
+import os,sys,re,gzip,datetime # datetime.datetime object can't be imported
+                               # directly because datetime's __repr__
+                               # assumptions will cause errors when eval-ing
+                               # written data
+from ast import literal_eval
 from subprocess import call
 from time import sleep
-from datetime import datetime,timedelta,tzinfo,time
+from datetime import timedelta,tzinfo,time
 from optparse import OptionParser,OptionGroup
 from pprint import saferepr,isreadable
 from serial import Serial,SerialException,SerialTimeoutException
@@ -123,11 +129,10 @@ daemon_mode = Enum('read write')
 class UTC(tzinfo):
   def __init__(self) : super(UTC,self).__init__()
   def __str__(self) : return 'UTC'
-  def __repr__(self) : return self.__str__()
+  def __repr__(self) : return 'UTC()'
   def tzname(self,dt) : return self.__str__()
   def utcoffset(self,dt) : return timedelta(0)
   def dst(self,dt) : return timedelta(0)
-utc = UTC()
 
 class Data:
   '''
@@ -149,8 +154,8 @@ class Data:
     self.store_buffer = []       # buffer of data to be written into self.store_dir day files
     self.gzip_level = 9          # gzip compression level
     self.store_time = timedelta(days=1024) # age of stored data files before they're removed
-    self.zero_datetime = datetime.utcfromtimestamp(0) # 1970-01-01 00:00:00.000000 UTC
-    self.zero_time = time(0,0,0,0,utc) # 00:00:00.000000 UTC
+    self.zero_datetime = datetime.datetime.utcfromtimestamp(0) # 1970-01-01 00:00:00.000000 UTC
+    self.zero_time = time(0,0,0,0,UTC()) # 00:00:00.000000 UTC
 
   def __del__(self):
     '''
@@ -218,11 +223,11 @@ class Data:
     if not os.path.exists(self.temp_dir):
       os.makedirs(self.temp_dir)
     if not os.path.isdir(self.temp_dir):
-      raise OSError('Data temporary storage, %s, location is not a directory.' % self.temp_dir)
+      raise OSError('Data temporary storage location, %s, is not a directory.' % self.temp_dir)
     if not os.path.exists(self.store_dir):
       os.makedirs(self.store_dir)
     if not os.path.isdir(self.store_dir):
-      raise OSError('Data storage location,%s, is not a directory.' % self.store_dir)
+      raise OSError('Data storage location, %s, is not a directory.' % self.store_dir)
 
   def _read_temp_data(self):
     '''
@@ -234,7 +239,7 @@ class Data:
       f_cont = f.read()                                # read datum file
       f.close()                                        # close datum file
       if isreadable(f_cont) and len(f_cont) > 0:       # check readability of contents
-        self.store_buffer.append(eval(f_cont,{'UTC':utc,'datetime.datetime':datetime})) # append contents to store_buffer
+        self.store_buffer.append(literal_eval(f_cont)) # append contents to store_buffer
       else:
         raise SyntaxError('Cannot eval() datum, %s.' % f_cont)
 
@@ -251,11 +256,11 @@ class Data:
     particular files opened and used are determined by the timestamps of the
     data to be written
     '''
-    date = datetime.combine(timestamp,self.zero_time).date()    # date timestamp
-    f_name = os.path.join(self.storage_location,'%s.gz' % date) # file name
-    if os.path.isfile(f_name):                                  # check if file already exists as a regular file
-      return gzip.open(f_name,'a',self.gzip_level)              # open as gzipped file
-    else:                                                       # file exists and is not a regular file
+    date = datetime.datetime.combine(timestamp,self.zero_time).date() # date timestamp
+    f_name = os.path.join(self.storage_location,'%s.gz' % date)       # file name
+    if os.path.isfile(f_name):                                        # check if file already exists as a regular file
+      return gzip.open(f_name,'a',self.gzip_level)                    # open as gzipped file
+    elif os.path.exists():                                            # file exists and is not a regular file
       raise OSError('Data storage file, %s, is not a regular file.' % f_name)
 
 # module abstract base classes #################################################
@@ -340,13 +345,21 @@ class Charger(ModbusModule):
     self.name = 'charge controller'   # charger module name
     self.conf_message = ''            # state message
     self.message = ''                 # result message
-    self.define_enums()
-    self.define_bitfields()
+    self._define_enums()
+    self._define_bitfields()
     super(Charger,self).__init__(method='rtu',port='/dev/tts/1',baudrate=9600,bytesize=8,parity='N',stopbits=2,timeout=1.5)
     self.set_conf_state()
 
-  # TODO: add sweep enums, bitfields
-  def define_enums(self):
+  def set_conf_state(self): # TODO: read vendor name, etc.
+    self.conf_state = conf_state.initialized # module conf state
+
+  def poll_data(self):
+    registers = self.read_holding_registers(0x0000,0x0035,unit=0x01).registers
+    data_dict = self._structure_data(registers)
+    self._convert_enums_bitfields(data_dict)
+    return data_dict
+
+  def _define_enums(self):
     self.enums = {}
     self.enums['charge state'] = Enum().vals(
         START      =0,
@@ -387,7 +400,7 @@ class Charger(ModbusModule):
         GYR_ERROR                 =18,
         GYR_x_2                   =19)
 
-  def define_bitfields(self):
+  def _define_bitfields(self):
     self.bitfields = {}
     #    state                                         bit
     self.bitfields['array fault'] = [
@@ -447,8 +460,27 @@ class Charger(ModbusModule):
         'custom load settings',             # 11.5 V / 12.6 V             LVD / LVR             1
         'enabled (if battery type has EQ)', # disabled                    Equalize              2
         'MODBUS protocol']                  # Meterbus (MS remote meter)  Communication Select  3
+    self.bitfields['daily array fault'] = self.bitfields['array fault']
+    self.bitfields['daily load fault'] = self.bitfields['load fault']
+    self.bitfields['daily alarm'] = self.bitfields['alarm']
 
-  def structure_data(self,registers):
+  def _convert_enums_bitfields(self,data_dict):
+    '''
+    convert enums and bitfields into standard python types
+    '''
+    # convet enums
+    for parameter in ('charge state','load state','LED state'):
+      state = self.enums[parameter].lookup(data_dict[parameter][0])
+      data_dict[parameter] = (state,'enum')
+    # convert bitfields
+    for parameter in ('array fault','load fault','alarm','dip switch','daily array fault','daily load fault','daily alarm'):
+      state = []
+      for offset in xrange(32): # 2**32 == 16**8, MPPT double register data values are 16**8 large
+        if (data_dict[parameter][0] >> offset) & 1:
+          state.append(self.bitfields[parameter][offset])
+      data_dict[parameter] = (state,'bitfield')
+
+  def _structure_data(self,registers):
     '''
     convert numerical data to standard units and structure charger data
     '''
@@ -462,7 +494,7 @@ class Charger(ModbusModule):
         'ratio':2.**-8.}
     data_dict = { # dict of tuples of measurements and associated units
         'type':                  'charger',                                     # type of data structure
-        'timestamp':              datetime.now(utc),                            # [datetime object] Time stamp
+        'timestamp':              datetime.datetime.now(UTC()),                 # [datetime object] Time stamp
         'battery volts':         (registers[0x0008]*self.scale['V'],'V'),       # [V] (tau = 1 s) Voltage measured directly at the battery connection on the SunSaver MPPT.
         'array volts':           (registers[0x0009]*self.scale['V'],'V'),       # [V] (tau = 1 s) Va is the terminal voltage of the solar input connection.
         'load volts':            (registers[0x000A]*self.scale['V'],'V'),       # [V] (tau = 1 s) Vl is the terminal voltage of the load output connection.
@@ -475,13 +507,13 @@ class Charger(ModbusModule):
         'charge state':          (registers[0x0011],'enum'),                    # [enum] Reports the charge state.
         'array fault':           (registers[0x0012],'bitfield'),                # [bitfield] Reports faults identified by self diagnostics.
         'slow battery volts':    (registers[0x0013]*self.scale['V'],'V'),       # [V] (tau = 25 s) Voltage measured directly at the battery connection on the SunSaver MPPT.
-        'battery ref':          (registers[0x0014]*self.scale['V ref'],'V'),    # [V] Target voltage to which the battery will be charged. This value is temperature compensated.
+        'battery ref':           (registers[0x0014]*self.scale['V ref'],'V'),   # [V] Target voltage to which the battery will be charged. This value is temperature compensated.
         'Ah resetable charge':  ((registers[0x0015]<<16 | registers[0x0016])*self.scale['Ah'],'Ah'), # [A*h] Reports total solar amp-hours since last ah reset.
         'Ah total charge':      ((registers[0x0017]<<16 | registers[0x0018])*self.scale['Ah'],'Ah'), # [A*h] Reports total solar amp-hours since last ah reset.
         'kWh charge':            (registers[0x0019]*self.scale['kWh'],'kWh'),   # [kW*h] Reports total solar kilowatt-hours since last ah/kWh reset.
         'load state':            (registers[0x001A],'enum'),                    # [enum] Reports the charge state.
         'load fault':            (registers[0x001B],'bitfield'),                # [bitfield] Reports faults identified by self diagnostics.
-        'low disconnect volts': (registers[0x001C]*self.scale['V'],'V'),        # [V] Low voltage disconnect setpoint, current compensated.
+        'low disconnect volts':  (registers[0x001C]*self.scale['V'],'V'),       # [V] Low voltage disconnect setpoint, current compensated.
         'resetable load':       ((registers[0x001D]<<16 | registers[0x001E])*self.scale['Ah'],'Ah'), # [A*h] Reports total load amp-hours since last ah reset.
         'total load':           ((registers[0x001F]<<16 | registers[0x0020])*self.scale['Ah'],'Ah'), # [A*h] Reports total load amp-hours since last ah reset.
         'hour meter':            (registers[0x0021]<<16 | registers[0x0022],'h'), # [h] Reports total hours of operation since installed.
@@ -501,33 +533,9 @@ class Charger(ModbusModule):
         'daily alarm':           (registers[0x0031]<<16 | registers[0x0032],'bitfield'), # [bitfield] Reports alarms identified by self diagnostics that occurred today.
         'min Vb':                (registers[0x0033]*self.scale['V'],'V'),       # [V] Tracks the minimum battery voltage over time.
         'max Vb':                (registers[0x0034]*self.scale['V'],'V'),       # [V] Tracks the maximum battery voltage over time.
+        # There are further registers here, but they don't hold any data
         }
     return data_dict
-
-  def set_conf_state(self): # TODO: read vendor name, etc.
-    self.conf_state = conf_state.initialized # module conf state
-
-  def poll_data(self):
-    registers = self.read_holding_registers(0x0000,0x0056,unit=0x01).registers
-    data_dict = self.structure_data(registers)
-    self.convert_enums_bitfields(data_dict)
-    return data_dict
-
-  def convert_enums_bitfields(self,data_dict):
-    '''
-    convert enums and bitfields into standard python types
-    '''
-    # convet enums
-    for parameter in ('charge state','load state','LED state'):
-      state = self.enums[parameter].lookup(data_dict[parameter][0])
-      data_dict[parameter] = (state,'enum')
-    # convert bitfields
-    for parameter in ('array fault','load fault','alarm','dip switch'):
-      state = []
-      for offset in xrange(32): # 2**32 == 16**8, MPPT double register data values are 16**8 large
-        if (data_dict[parameter][0] >> offset) & 1:
-          state.append(self.bitfields[parameter][offset])
-      data_dict[parameter] = (state,'bitfield')
 
 class PTH(SerialModule):
   '''
@@ -610,7 +618,7 @@ class PTH(SerialModule):
 
   def poll_data(self):
     self.read() # clear output buffer
-    data_dict = {'type':'PTH','timestamp':datetime.now(utc)}
+    data_dict = {'type':'PTH','timestamp':datetime.datetime.now(UTC())}
     for name,unit in (('PRESS','Pa'),('TEMP','K'),('HUMID','%'),('RAIN','enum'),('SUPPLY','V')):
       self.write('%s\r\n' % name)
       message = self.read()
@@ -825,7 +833,7 @@ class Radiometer(SerialModule,PowerModule):
         energies.append(float(i))
       except:
         pass
-    data_dict = {'type':'radiometer','timestamp':datetime.now(utc),'energies':(energies,'J')}
+    data_dict = {'type':'radiometer','timestamp':datetime.datetime.now(UTC()),'energies':(energies,'J')}
     return data_dict
 
 class Shutter(PowerModule):
@@ -1371,17 +1379,17 @@ class Runner(Operator):
       control.phase = phase.run
       log.report('collecting data\n',color=log.GRAY)
       three_minutes = timedelta(minutes=3)
-      now = self.start_time = datetime.now(utc)      # record laser on time
-      control.on_laser()                             # power on laser
-      while (now < self.start_time + three_minutes): # run for 3 m
+      now = self.start_time = datetime.datetime.now(UTC()) # record laser on time
+      control.on_laser()                                   # power on laser
+      while (now < self.start_time + three_minutes):       # run for 3 m
         control.collect_charger_datum()
         control.collect_PTH_datum()
-        sleep(5)                                     # collect charger,PTH data every 5 s
-        now = datetime.now(utc)                      # new timestamp
-      control.off_laser()                            # power off laser
-      control.collect_charger_datum()                # collect final charger datum
-      control.collect_PTH_datum()                    # collect final PTH datum
-      self.stop_time = datetime.now(utc)             # record laser off time
+        sleep(5)                                           # collect charger,PTH data every 5 s
+        now = datetime.datetime.now(UTC())                 # new timestamp
+      control.off_laser()                                  # power off laser
+      control.collect_charger_datum()                      # collect final charger datum
+      control.collect_PTH_datum()                          # collect final PTH datum
+      self.stop_time = datetime.datetime.now(UTC())        # record laser off time
       log.report('done collecting\n',color=log.GRAY)
 
       control.phase = phase.final
