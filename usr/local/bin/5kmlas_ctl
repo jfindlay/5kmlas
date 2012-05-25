@@ -135,7 +135,7 @@ class UTC(tzinfo):
 
 class Data:
   '''
-  Data events are written to self.temp_dir where they are buffered until
+  Data events are written to self.temp_file where they are buffered until
   written to self.store_dir.  Data is written to files in self.store_dir with
   one file per UTC day.  Each event datum is written in chronological order to
   the storage file that matches its timestamp.
@@ -144,9 +144,9 @@ class Data:
   # ensure that past days have been processed in case that a calibrator process
   # was active when cron initiated the daemon-write process
   def __init__(self):
-    self.temp_dir = '/tmp/data'  # location of temporary data storage files
+    self.temp_file = '/tmp/data' # location of temporary data storage file
     self.store_dir = '/tmp/store' # location of data storage files
-    self._ensure_dirs()          # ensure self.temp_dir and self.store_dir
+    self._ensure_dirs()          # ensure self.temp_file and self.store_dir
     self.temp_names = []         # list of the names of temporary files
     self.store_files = {}        # dictionary of storage files
     self.temp_buffer = []        # buffer of data to be written into self.tmp datum files
@@ -175,12 +175,11 @@ class Data:
     write data to temporary storage location
     '''
     self.temp_buffer.sort(key=lambda datum : datum['timestamp']) # sort data by timestamp
+    f = open(self.temp_file,'a')        # open file
     for datum in self.temp_buffer:
-      f_name = os.path.join(self.temp_dir,'%s.%s' % (datum['type'],datum['timestamp']))
-      f = open(f_name,'w')     # open file
-      f.write(saferepr(datum)) # write datum
-      f.close()                # close file
-    del self.temp_buffer[:]    # clear data buffer
+      f.write('%s\n' % saferepr(datum)) # write datum
+    f.close()                           # close file
+    del self.temp_buffer[:]             # clear data buffer
 
   def store(self):
     '''
@@ -189,18 +188,23 @@ class Data:
     collected into the corresponding day file
     '''
     # TODO: write data in DST 5kmlas bank format
-    self._read_temp_data() # read temp file contents into self.store_buffer
+    temp_f = open(self.temp_file,'r')        # open temp file
+    for line in temp_f.read():               # read temp file contents into self.store_buffer
+      if isreadable(line) and len(line) > 0: # check readability of file contents
+        self.store_buffer.append(eval(line)) # append contents to store_buffer
+      else:
+        raise SyntaxError('Cannot eval() datum, %s.' % line)
     self.store_buffer.sort(key=lambda datum : datum['timestamp']) # sort data by timestamp
     for datum in self.store_buffer:
+      timestamp = datum['timestamp']
       # while iterating over data, instantiate necessary file objects
-      if not datum['timestamp'] in self.store_files.keys():
-        f = self._get_store_file(datum['timestamp']) # current file
-        self.store_files[datum['timestamp']] = f     # add curent file to store file dict
-      f.write('%s\n' % saferepr(datum))              # write datum
+      if not timestamp in self.store_files.keys():
+        self.store_files[timestamp] = self._get_store_file(timestamp) # current store file
+      self.store_files[timestamp].write('%s\n' % saferepr(datum))     # write datum
     for timestamp in self.store_files.keys():
-      self.store_files[timestamp].close()            # close file objects
-    del self.store_buffer[:]                         # clear store buffer
-    #self._remove_temp_data()                         # clear temp data files
+      self.store_files[timestamp].close()                             # close file objects
+    del self.store_buffer[:]                                          # clear store buffer
+    #os.remove(self.temp_file)                                         # remove temp data file
 
   def rsync(self):
     '''
@@ -216,37 +220,15 @@ class Data:
 
   def _ensure_dirs(self):
     '''
-    ensure that self.temp_dir and self.store_dir exist and are directories
+    ensure that self.temp_file exists and is a file and self.store_dir exist and is a directory
     '''
-    if not os.path.exists(self.temp_dir):
-      os.makedirs(self.temp_dir)
-    if not os.path.isdir(self.temp_dir):
-      raise OSError('Data temporary storage location, %s, is not a directory.' % self.temp_dir)
+    if os.path.exists(self.temp_file) and not os.path.isfile(self.temp_file):
+      raise OSError('Data temporary storage location, %s, is not a file.' % self.temp_file)
     if not os.path.exists(self.store_dir):
       os.makedirs(self.store_dir)
     if not os.path.isdir(self.store_dir):
       raise OSError('Data storage location, %s, is not a directory.' % self.store_dir)
 
-  def _read_temp_data(self):
-    '''
-    collect data stored in self.temp_dir
-    '''
-    self.temp_names = [f for f in os.listdir(self.temp_dir) if os.path.isfile(os.path.join(self.temp_dir,f))]
-    for f_name in self.temp_names:
-      f = open(os.path.join(self.temp_dir,f_name),'r') # open datum file
-      f_cont = f.read()                                # read datum file
-      f.close()                                        # close datum file
-      if isreadable(f_cont) and len(f_cont) > 0:       # check readability of contents
-        self.store_buffer.append(eval(f_cont))         # append contents to store_buffer
-      else:
-        raise SyntaxError('Cannot eval() datum, %s.' % f_cont)
-
-  def _remove_temp_data(self):
-    '''
-    delete temporary data files
-    '''
-    for f_name in self.temp_names:
-      os.remove(f_name)
 
   def _get_store_file(self,timestamp):
     '''
