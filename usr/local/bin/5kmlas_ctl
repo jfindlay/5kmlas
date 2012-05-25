@@ -44,7 +44,6 @@ import os,sys,re,gzip,datetime # datetime.datetime object can't be imported
                                # directly because datetime's __repr__
                                # assumptions will cause errors when eval-ing
                                # written data
-from ast import literal_eval
 from subprocess import call
 from time import sleep
 from datetime import timedelta,tzinfo,time
@@ -195,14 +194,13 @@ class Data:
     for datum in self.store_buffer:
       # while iterating over data, instantiate necessary file objects
       if not datum['timestamp'] in self.store_files.keys():
-        self.store_files[datum['timestamp']] = self._get_store_file(datum['timestamp'])
-      f = self.store_files[datum['timestamp']] # current file
-      f.write('%s\n' % saferepr(datum))        # write datum
-      f.flush() ; os.fsync(f.fileno())         # flush buffer out to file
+        f = self._get_store_file(datum['timestamp']) # current file
+        self.store_files[datum['timestamp']] = f     # add curent file to store file dict
+      f.write('%s\n' % saferepr(datum))              # write datum
     for timestamp in self.store_files.keys():
-      self.store_files[timestamp].close()      # close file objects
-    del self.store_buffer[:]                   # clear store buffer
-    #self._remove_temp_data()                   # clear temp data files
+      self.store_files[timestamp].close()            # close file objects
+    del self.store_buffer[:]                         # clear store buffer
+    #self._remove_temp_data()                         # clear temp data files
 
   def rsync(self):
     '''
@@ -239,7 +237,7 @@ class Data:
       f_cont = f.read()                                # read datum file
       f.close()                                        # close datum file
       if isreadable(f_cont) and len(f_cont) > 0:       # check readability of contents
-        self.store_buffer.append(literal_eval(f_cont)) # append contents to store_buffer
+        self.store_buffer.append(eval(f_cont))         # append contents to store_buffer
       else:
         raise SyntaxError('Cannot eval() datum, %s.' % f_cont)
 
@@ -257,10 +255,10 @@ class Data:
     data to be written
     '''
     date = datetime.datetime.combine(timestamp,self.zero_time).date() # date timestamp
-    f_name = os.path.join(self.storage_location,'%s.gz' % date)       # file name
+    f_name = os.path.join(self.store_dir,'%s.gz' % date)              # file name
     if os.path.isfile(f_name):                                        # check if file already exists as a regular file
       return gzip.open(f_name,'a',self.gzip_level)                    # open as gzipped file
-    elif os.path.exists():                                            # file exists and is not a regular file
+    elif os.path.exists(f_name):                                      # file exists and is not a regular file
       raise OSError('Data storage file, %s, is not a regular file.' % f_name)
 
 # module abstract base classes #################################################
