@@ -146,7 +146,7 @@ class Data:
   def __init__(self):
     self.temp_file = '/tmp/data' # location of temporary data storage file
     self.store_dir = '/tmp/store' # location of data storage files
-    self._ensure_dirs()          # ensure self.temp_file and self.store_dir
+    self._ensure_paths()         # ensure self.temp_file and self.store_dir
     self.temp_names = []         # list of the names of temporary files
     self.store_files = {}        # dictionary of storage files
     self.temp_buffer = []        # buffer of data to be written into self.tmp datum files
@@ -188,23 +188,21 @@ class Data:
     collected into the corresponding day file
     '''
     # TODO: write data in DST 5kmlas bank format
-    temp_f = open(self.temp_file,'r')        # open temp file
-    for line in temp_f.read():               # read temp file contents into self.store_buffer
+    for line in open(self.temp_file,'r'):    # read temp file contents into self.store_buffer
       if isreadable(line) and len(line) > 0: # check readability of file contents
         self.store_buffer.append(eval(line)) # append contents to store_buffer
       else:
         raise SyntaxError('Cannot eval() datum, %s.' % line)
     self.store_buffer.sort(key=lambda datum : datum['timestamp']) # sort data by timestamp
     for datum in self.store_buffer:
-      timestamp = datum['timestamp']
-      # while iterating over data, instantiate necessary file objects
-      if not timestamp in self.store_files.keys():
-        self.store_files[timestamp] = self._get_store_file(timestamp) # current store file
-      self.store_files[timestamp].write('%s\n' % saferepr(datum))     # write datum
-    for timestamp in self.store_files.keys():
-      self.store_files[timestamp].close()                             # close file objects
-    del self.store_buffer[:]                                          # clear store buffer
-    #os.remove(self.temp_file)                                         # remove temp data file
+      date = datum['timestamp'].date()                       # date of datum
+      if not date in self.store_files.keys():                # get corresponding day file
+        self.store_files[date] = self._get_store_file(date)  # current day file
+      self.store_files[date].write('%s\n' % saferepr(datum)) # write datum
+    for date in self.store_files.keys():
+      self.store_files[date].close()                         # close file objects
+    del self.store_buffer[:]                                 # clear store buffer
+    os.remove(self.temp_file)                                # remove temp data file
 
   def rsync(self):
     '''
@@ -218,7 +216,7 @@ class Data:
       call(('/usr/bin/rsync','-q',self.store_dir,'tamember@<computer_name_here>:</path/to/rsync/dir/here/>'))
     # TODO: remove old data files
 
-  def _ensure_dirs(self):
+  def _ensure_paths(self):
     '''
     ensure that self.temp_file exists and is a file and self.store_dir exist and is a directory
     '''
@@ -230,18 +228,16 @@ class Data:
       raise OSError('Data storage location, %s, is not a directory.' % self.store_dir)
 
 
-  def _get_store_file(self,timestamp):
+  def _get_store_file(self,date):
     '''
-    open one gzipped storage file per the UTC day inferred by timestamp.  The
-    particular files opened and used are determined by the timestamps of the
-    data to be written
+    open one gzipped storage file per the UTC day.  The particular files opened
+    and used are determined by the timestamps of the data to be written
     '''
-    date = datetime.datetime.combine(timestamp,self.zero_time).date() # date timestamp
     f_name = os.path.join(self.store_dir,'%s.gz' % date)              # file name
-    if os.path.isfile(f_name):                                        # check if file already exists as a regular file
-      return gzip.open(f_name,'a',self.gzip_level)                    # open as gzipped file
-    elif os.path.exists(f_name):                                      # file exists and is not a regular file
+    if os.path.exists(f_name) and not os.path.isfile(f_name):         # file exists and is not a regular file
       raise OSError('Data storage file, %s, is not a regular file.' % f_name)
+    else:
+      return gzip.open(f_name,'a',self.gzip_level)                    # open as gzipped file
 
 # module abstract base classes #################################################
 
@@ -267,7 +263,7 @@ class SerialModule(Serial):
   def read(self):
     try:
       self.communication_state = communication_state.success
-      return super(SerialModule,self).read(self.buffer_size).strip()
+      return super(SerialModule,self).read(self.buffer_size).strip() # strip padding whitespace
     except SerialException,serial_exception:
       self.communication_state = communication_state.error
       self.message = 'failed to read from serial device %s: %s' % (self.name,serial_exception)
@@ -797,7 +793,7 @@ class Radiometer(SerialModule,PowerModule):
 
   def set_conf_state(self):
     self.write('ST\r')                      # check error status
-    self.conf_message = self.read().strip() # strip leading,trailing whitespace
+    self.conf_message = self.read()         # read message
     if re.search(r'0',self.conf_message):   # if no errors
       self.conf_state = conf_state.initialized
       self.message = 'radiometer returned error status "0", no error'
@@ -968,7 +964,7 @@ class Control:
     if module.conf_state == desired_state:
       log.report('done\n',color=log.GREEN)
       log.detail('%s\n' % module.message)
-    elif module.conf_state == conf_state.undefined or module.conf_state == conf_state.finalized:
+    elif module.conf_state == conf_state.undefined:
       log.inform('failed\n',color=log.RED)
       log.inform('%s\n' % module.message)
       self.shutdown()
@@ -1006,8 +1002,10 @@ class Control:
     if module.communication_state == communication_state.success:
       return # serial module successfully written to or read from
     elif module.communication_state == communication_state.error:
+      log.inform('error\n',color=log.RED)
       self.shutdown()
     elif module.communication_state == communication_state.timeout:
+      log.inform('timeout\n',color=log.RED)
       self.shutdown()
 
   def shutdown(self,module_no_off=None):
@@ -1053,7 +1051,7 @@ class Control:
       log.report('writing data ... ')
     else:
       log.detail('writing data ... ')
-    self.data.write() # format and save data, then clear data buffer
+    self.data.write() # format and save data to temporary storage location
     # TODO: check write state
     if self.phase == phase.final:
       log.report('done\n',color=log.GREEN)
@@ -1080,9 +1078,11 @@ class Control:
     self.check_conf_state(conf_state.initialized,module=self.charger) # check charger init state
 
   def collect_charger_datum(self):
+    log.report('collecting charger datum ... ')
     charger_datum = self.charger.poll_data()
     self.check_communication_state(module=self.charger) # check write state
     self.data.append(charger_datum=charger_datum)       # append datum
+    log.report('done\n',color=log.GREEN)
     log.detail('%s\n' % charger_datum)                  # print charger datum when verbose
     return charger_datum
 
@@ -1144,9 +1144,11 @@ class Control:
     self.check_rain_state(module=self.rain)         # check rain state
 
   def collect_PTH_datum(self):
+    log.report('collecting PTH datum ... ')
     PTH_datum = self.PTH.poll_data()
     self.check_communication_state(module=self.PTH) # check write state
     self.data.append(PTH_datum=PTH_datum)           # append datum
+    log.report('done\n',color=log.GREEN)
     log.detail('%s\n' % PTH_datum)                  # print PTH datum when verbose
     return PTH_datum
 
@@ -1288,7 +1290,7 @@ class Daemon(Operator):
         raise OSError('%d `5kmlas_ctl daemon-write` process(es) {is|are} running.  Only one instance of `5kmlas_ctl daemon-{read|write}` should run at a time.' % instances['daemon-write'])
 
   def run(self,control):
-#    try: # try to emergency shutdown in case of any error
+#    try: # try to shutdown in case of any error
       control.phase = phase.init
       control.init_data()                # init data structure
       if self.mode == daemon_mode.read:  # poll data
@@ -1302,13 +1304,13 @@ class Daemon(Operator):
         control.write_data()             # write data
         control.phase = phase.final
         control.off_rain()               # power off rain monitor
-        control.poll_rain()              # check rain state
       if self.mode == daemon_mode.write: # collate data into UTC day files
         control.phase = phase.run
         control.store_data()             # collate and store data
         control.phase = phase.final      # nothing is finalized in daemon-write mode
 #    except Exception,exception:
 #      log.inform('5kmlas_ctl encountered an error: %s.\n' % exception,color=log.RED)
+#      control.write_data()               # try to save any data
 #      control.shutdown()
 
 class Runner(Operator):
@@ -1342,7 +1344,7 @@ class Runner(Operator):
         break # this is the only `5kmlas_ctl` process running
 
   def run(self,control):
-#    try: # try to emergency shutdown in case of any error
+#    try: # try to shutdown in case of any error
       control.phase = phase.init
       control.init_data()       # init data structure
       control.init_charger()    # init charger
@@ -1386,6 +1388,7 @@ class Runner(Operator):
       log.detail('%s\n' % control.data)
 #    except Exception,exception:
 #      log.inform('5kmlas_ctl encountered an error: %s.\n' % exception,color=log.RED)
+#      control.write_data()               # try to save any data
 #      control.shutdown()
 
 class Calibrator(Operator):
