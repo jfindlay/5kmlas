@@ -63,7 +63,7 @@ class Gnuplot:
     self.stdin.write('plot %s\n' % a)
     sleep(0.1) # gnuplot file writes are nonblocking
 
-store_dir = 'store'
+store_dir = '/var/www/5kmlas/data'
 
 def read_data():
   d = {}
