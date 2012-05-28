@@ -14,6 +14,8 @@
 # - mount rootfs on SBC readonly in chrooted or pivot_rooted USB system
 # - mount root of USB system readonly
 # - ensure cron is started in USB system during bootup
+# - sync system clock with Middle Drum at the beginning of each run (or just first run of the night)
+# - factor out unit information from data into seperate data template code (DST bank documentation?)
 
 # A module is a discrete, active component of the 5kmlas system.  It consists
 # of either a physical unit and a corresponding python class/object singleton or
@@ -121,7 +123,7 @@ rain_state = Enum('undefined dry wet open')
 # serial states
 communication_state = Enum('undefined success error timeout')
 # run modes
-run_mode = Enum('daemon runner calibrator')
+run_mode = Enum('daemon runner calibrator') # TODO: change to 'run calibrate poll store' and make the argument mandatory
 daemon_mode = Enum('read write')
 
 # for some reason, I have to implement UTC
@@ -499,16 +501,17 @@ class Charger(ModbusModule):
         'power out':             (registers[0x0027]*self.scale['W'],'W'),       # [W] Output power to the battery.
         # sweep data is redundant, since the charger is regularly polled, but may be useful
         'sweep Vmp':             (registers[0x0028]*self.scale['V'],'V'),       # [V] Maximum power voltage of the solar array found during last sweep.
-        'sweep Pmax':            (registers[0x0029]*self.scale['W'],'V'),       # [W] Maximum power output of the solar array found during last sweep.
+        'sweep Pmax':            (registers[0x0029]*self.scale['W'],'W'),       # [W] Maximum power output of the solar array found during last sweep.
         'sweep Voc':             (registers[0x002A]*self.scale['V'],'V'),       # [V] Open circuit voltage of the solar array found during last sweep.
         'daily Vb min':          (registers[0x002B]*self.scale['V'],'V'),       # [V] Minimum battery voltage measured today (value resets after dark).
         'daily Vb max':          (registers[0x002C]*self.scale['V'],'V'),       # [V] Maximum battery voltage measured today (value resets after dark).
+        'daily Ah charge':       (registers[0x002D]*self.scale['Ah'],'Ah'),     # [A*h] Total charge amp-hours accumulated today (value resets after dark).
         'daily Ah load':         (registers[0x002E]*self.scale['Ah'],'Ah'),     # [A*h] Total load amp-hours accumulated today (value resets after dark).
-        'daily array fault':     (registers[0x002F],'bitfield'),                # [bitfield] Reports array faults identified by self diagnostics that occurred today.
-        'daily load fault':      (registers[0x0030],'bitfield'),                # [bitfield] Reports load faults identified by self diagnostics that occurred today.
-        'daily alarm':           (registers[0x0031]<<16 | registers[0x0032],'bitfield'), # [bitfield] Reports alarms identified by self diagnostics that occurred today.
-        'min Vb':                (registers[0x0033]*self.scale['V'],'V'),       # [V] Tracks the minimum battery voltage over time.
-        'max Vb':                (registers[0x0034]*self.scale['V'],'V'),       # [V] Tracks the maximum battery voltage over time.
+        'daily array fault':     (registers[0x002F],'bitfield'),                # [bitfield] Reports array faults identified by self diagnostics that occurred today (value resets after dark).
+        'daily load fault':      (registers[0x0030],'bitfield'),                # [bitfield] Reports load faults identified by self diagnostics that occurred today (value resets after dark).
+        'daily alarm':           (registers[0x0031]<<16 | registers[0x0032],'bitfield'), # [bitfield] Reports alarms identified by self diagnostics that occurred today (value resets after dark).
+        'min Vb':                (registers[0x0033]*self.scale['V'],'V'),       # [V] Tracks the minimum battery voltage over time (value resets after dark).
+        'max Vb':                (registers[0x0034]*self.scale['V'],'V'),       # [V] Tracks the maximum battery voltage over time (value resets after dark).
         # There are further registers here, but they don't hold any data
         }
     return data_dict
@@ -1280,14 +1283,14 @@ class Daemon(Operator):
       sys.exit(0) # do not poll hardware or process data when running
     if instances['daemon-read'] > 0:
       if instances['daemon-read'] > 1 and self.mode == daemon_mode.read:
-        raise OSError('%d `5kmlas_ctl daemon-read` process(es) {is|are} running.  Only one instance of `5kmlas_ctl daemon-{read|write}` should run at a time.' % instances['daemon-read'])
+        raise OSError('%d other `5kmlas_ctl daemon-read` process(es) {is|are} running.  Only one instance of `5kmlas_ctl daemon-{read|write}` should run at a time.' % instances['daemon-read'])
       elif self.mode == daemon_mode.write:
-        raise OSError('%d `5kmlas_ctl daemon-read` process(es) {is|are} running.  Only one instance of `5kmlas_ctl daemon-{read|write}` should run at a time.' % instances['daemon-read'])
+        raise OSError('%d other `5kmlas_ctl daemon-read` process(es) {is|are} running.  Only one instance of `5kmlas_ctl daemon-{read|write}` should run at a time.' % instances['daemon-read'])
     if instances['daemon-write'] > 0:
       if instances['daemon-write'] > 1 and self.mode == daemon_mode.write:
-        raise OSError('%d `5kmlas_ctl daemon-write` process(es) {is|are} running.  Only one instance of `5kmlas_ctl daemon-{read|write}` should run at a time.' % instances['daemon-write'])
+        raise OSError('%d other `5kmlas_ctl daemon-write` process(es) {is|are} running.  Only one instance of `5kmlas_ctl daemon-{read|write}` should run at a time.' % instances['daemon-write'])
       elif self.mode == daemon_mode.read:
-        raise OSError('%d `5kmlas_ctl daemon-write` process(es) {is|are} running.  Only one instance of `5kmlas_ctl daemon-{read|write}` should run at a time.' % instances['daemon-write'])
+        raise OSError('%d other `5kmlas_ctl daemon-write` process(es) {is|are} running.  Only one instance of `5kmlas_ctl daemon-{read|write}` should run at a time.' % instances['daemon-write'])
 
   def run(self,control):
 #    try: # try to shutdown in case of any error
@@ -1337,9 +1340,9 @@ class Runner(Operator):
         log.inform('A `5kmlas_ctl daemon-write` process is running: waiting %d s for it to finish.\n' % wait_time)
         sleep(wait_time)
       elif instances['calibrator'] > 0:
-        raise OSError('%d `5kmlas_ctl calibrator` process(es) {is|are} running.  Only one instance of `5kmlas_ctl {runner|calibrator}` should run at a time.\n' % instances['calibrator'])
+        raise OSError('%d other `5kmlas_ctl calibrator` process(es) {is|are} running.  Only one instance of `5kmlas_ctl {runner|calibrator}` should run at a time.\n' % instances['calibrator'])
       elif instances['runner'] > 1: # this is a runner process
-        raise OSError('%d `5kmlas_ctl runner` process(es) {is|are} running.  Only one instance of `5kmlas_ctl {runner|calibrator}` should run at a time.\n' % instances['runner'])
+        raise OSError('%d other `5kmlas_ctl runner` process(es) {is|are} running.  Only one instance of `5kmlas_ctl {runner|calibrator}` should run at a time.\n' % instances['runner'])
       else:
         break # this is the only `5kmlas_ctl` process running
 
