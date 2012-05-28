@@ -2,6 +2,6 @@
 
 /etc/init.d/ppp restart
 cd /root/5kmlas
-rsync -a 192.168.0.2:/tmp/store .
+rsync -a 192.168.0.2:/tmp/store /var/www/5kmlas/data
 python src/scripts/analyze.py
 echo "http://155.101.250.147/5kmlas/plots/" | mail -t "findlay@cosmic.utah.edu,thomas@physics.utah.edu" -s "new plots: $(date -u --iso-8601)"

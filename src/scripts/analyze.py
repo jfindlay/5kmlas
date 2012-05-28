@@ -96,7 +96,7 @@ def main():
   g.set('xdata time')
   g.set('format x "%s"' % g.axis_time_format)
   # PTH SUPPLY, slow batt volts, array volts
-  g.set('output "plots/volts.png"')
+  g.set('output "/var/www/5kmlas/plots/volts.png"')
   x = timestamps(full_data['PTH'],g.time_format)
   y_1 = datums(full_data['PTH'],'SUPPLY')
   y_2 = datums(full_data['charger'],'slow battery volts')
@@ -106,7 +106,7 @@ def main():
   g.set('ylabel "electric potential [V]"')
   g.plot('"%s" using 1:2 with line t "PTH SUPPLY volts", "%s" using 1:3 with line t "slow batt volts", "%s" using 1:4 with line t "array volts"' % ((g.f_name,)*3))
   # charger load current, charging current
-  g.set('output "plots/currents.png"')
+  g.set('output "/var/www/5kmlas/plots/currents.png"')
   x = timestamps(full_data['charger'],g.time_format)
   y_1 = datums(full_data['charger'],'load current')
   y_2 = datums(full_data['charger'],'charging current')
@@ -115,7 +115,7 @@ def main():
   g.set('ylabel "electric current [I]"')
   g.plot('"%s" using 1:2 with line t "load current", "%s" using 1:3 with line t "charging current"' % ((g.f_name,)*2))
   # battery charge
-  g.set('output "plots/charge.png"')
+  g.set('output "/var/www/5kmlas/plots/charge.png"')
   x = timestamps(full_data['charger'],g.time_format)
   y_1 = datums(full_data['charger'],'Ah total charge')
   g.write_file(x,y_1)
@@ -123,7 +123,7 @@ def main():
   g.set('ylabel "electric energy [A*h]"')
   g.plot('"%s" using 1:2 with line t "battery charge"' % g.f_name)
   # charger ambient, heatsink temp, PTH temp
-  g.set('output "plots/temps.png"')
+  g.set('output "/var/www/5kmlas/plots/temps.png"')
   x = timestamps(full_data['charger'],g.time_format)
   y_1 = datums(full_data['charger'],'heatsink temp',273.15)
   y_2 = datums(full_data['charger'],'ambient temp',273.15)
