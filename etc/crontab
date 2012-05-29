@@ -14,5 +14,5 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 #52 6	1 * *	root	test -x /usr/sbin/anacron || ( cd / && run-parts --report /etc/cron.monthly )
 
 */5 * * * * root /tmp/5kmlas_ctl daemon-read
-30 0 * * * root /tmp/5kmlas_ctl daemon-write
-10 */8 * * * root /tmp/5kmlas_ctl runner
+17 0 * * * root /tmp/5kmlas_ctl daemon-write
+7 */8 * * * root /tmp/5kmlas_ctl runner
