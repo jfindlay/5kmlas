@@ -63,6 +63,11 @@ class Gnuplot:
     self.stdin.write('plot %s\n' % a)
     sleep(0.1) # gnuplot file writes are nonblocking
 
+  def plot_file(self,a=None,n=1):
+    cmd = 'plot %s\n' % a                   # gnuplot command
+    self.stdin.write(cmd % (self.f_name)*n) # insert self.f_name n times
+    sleep(0.1) # gnuplot file writes are nonblocking
+
 store_dir = '/var/www/5kmlas/data'
 
 def read_data():
@@ -81,8 +86,8 @@ def read_data():
 def nums(a):
   return [i for i in xrange(len(a))]
 
-def datums(d,measure,add_adj=0,mult_adj=1):
-  return [float(i[measure][0])*mult_adj + add_adj for i in d]
+def datums(d,measure,func='%f'):
+  return [float(func % float(i[measure][0])) for i in d]
 
 def timestamps(d,fmt):
   return [i['timestamp'].strftime(fmt) for i in d]
@@ -104,7 +109,7 @@ def main():
   g.write_file(x,y_1,y_2,y_3)
   g.set('xlabel "UTC"')
   g.set('ylabel "electric potential [V]"')
-  g.plot('"%s" using 1:2 with line t "PTH SUPPLY volts", "%s" using 1:3 with line t "slow batt volts", "%s" using 1:4 with line t "array volts"' % ((g.f_name,)*3))
+  g.plot_file('"%s" using 1:2 with line t "PTH SUPPLY volts", "%s" using 1:3 with line t "slow batt volts", "%s" using 1:4 with line t "solar array volts"',3)
   # charger load current, charging current
   g.set('output "/var/www/5kmlas/plots/currents.png"')
   x = timestamps(full_data['charger'],g.time_format)
@@ -113,7 +118,7 @@ def main():
   g.write_file(x,y_1,y_2)
   g.set('xlabel "UTC"')
   g.set('ylabel "electric current [I]"')
-  g.plot('"%s" using 1:2 with line t "load current", "%s" using 1:3 with line t "charging current"' % ((g.f_name,)*2))
+  g.plot_file('"%s" using 1:2 with line t "load current", "%s" using 1:3 with line t "charging current"',2)
   # battery charge
   g.set('output "/var/www/5kmlas/plots/charge.png"')
   x = timestamps(full_data['charger'],g.time_format)
@@ -121,17 +126,17 @@ def main():
   g.write_file(x,y_1)
   g.set('xlabel "UTC"')
   g.set('ylabel "electric energy [A*h]"')
-  g.plot('"%s" using 1:2 with line t "battery charge"' % g.f_name)
+  g.plot_file('"%s" using 1:2 with line t "battery charge"',1)
   # charger ambient, heatsink temp, PTH temp
   g.set('output "/var/www/5kmlas/plots/temps.png"')
   x = timestamps(full_data['charger'],g.time_format)
-  y_1 = datums(full_data['charger'],'heatsink temp',273.15)
-  y_2 = datums(full_data['charger'],'ambient temp',273.15)
+  y_1 = datums(full_data['charger'],'heatsink temp','%f + 273.15')
+  y_2 = datums(full_data['charger'],'ambient temp','%f + 273.15')
   y_3 = datums(full_data['PTH'],'TEMP')
   g.write_file(x,y_1,y_2,y_3)
   g.set('xlabel "UTC"')
   g.set('ylabel "temperature [K]"')
-  g.plot('"%s" using 1:2 with line t "heatsink temp", "%s" using 1:3 with line t "ambient temp", "%s" using 1:4 with line t "PTH TEMP"' % ((g.f_name,)*3))
+  g.plot_file('"%s" using 1:2 with line t "heatsink temp", "%s" using 1:3 with line t "ambient temp", "%s" using 1:4 with line t "PTH TEMP"',3)
 
 if __name__ == '__main__':
   try:

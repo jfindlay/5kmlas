@@ -5,9 +5,6 @@
 
 # TODO:
 # - develop rigorous and thorough hardware failure simulation routine
-# - replace color code with curses color code
-# - replace custom logging with python logging module
-# - convert remaining MPPT bitfields and enums
 # - remote capture of data should happen during calibration run since Middle
 #   Drum operates off-grid, therefore, discontinuously
 # - create unprivileged user to run 5kmlas_ctl runner/calibrator
@@ -15,7 +12,6 @@
 # - mount root of USB system readonly
 # - ensure cron is started in USB system during bootup
 # - sync system clock with Middle Drum at the beginning of each run (or just first run of the night)
-# - factor out unit information from data into seperate data template code (DST bank documentation?)
 
 # A module is a discrete, active component of the 5kmlas system.  It consists
 # of either a physical unit and a corresponding python class/object singleton or
@@ -24,7 +20,7 @@
 # list of modules in the hierarchy of program control:
 # - control: logical module.  Functions like a control panel.  All other
 #   modules connect with the control module in unified manner.  Provides
-#   failsafe shutdown functionality
+#   failsafe auto shutdown functionality
 #   * data: logical module.  Stores data in memory, writes it to /tmp/data and
 #     then /mnt/data
 #   * charger: regulates electrical energy supply and use among the solar
@@ -53,7 +49,7 @@ from optparse import OptionParser,OptionGroup
 from pprint import saferepr,isreadable
 from serial import Serial,SerialException,SerialTimeoutException
 from pymodbus.client.sync import ModbusSerialClient as ModbusClient
-from pymodbus.device import ModbusDeviceIdentification
+from pymodbus.mei_message import ReadDeviceInformationRequest
 from pymodbus.exceptions import ModbusException
 
 # data #########################################################################
@@ -115,7 +111,7 @@ class Enum:
     else : return names
 
 verbosity = Enum('quiet normal verbose') # message verbosity
-phase = Enum('undefined init run final') # phase
+phase = Enum('undefined init collect final') # phase
 # hardware states
 power_state = Enum('undefined on off')
 conf_state = Enum('undefined initialized finalized error')
@@ -123,8 +119,7 @@ rain_state = Enum('undefined dry wet open')
 # serial states
 communication_state = Enum('undefined success error timeout')
 # run modes
-run_mode = Enum('daemon runner calibrator') # TODO: change to 'run calibrate poll store' and make the argument mandatory
-daemon_mode = Enum('read write')
+run_mode = Enum('run calibrate poll store')
 
 # for some reason, I have to implement UTC
 class UTC(tzinfo):
@@ -142,9 +137,7 @@ class Data:
   one file per UTC day.  Each event datum is written in chronological order to
   the storage file that matches its timestamp.
   '''
-  # TODO:
-  # ensure that past days have been processed in case that a calibrator process
-  # was active when cron initiated the daemon-write process
+
   def __init__(self):
     self.temp_file = '/tmp/data' # location of temporary data storage file
     self.store_dir = '/tmp/store' # location of data storage files
@@ -154,7 +147,6 @@ class Data:
     self.temp_buffer = []        # buffer of data to be written into self.tmp datum files
     self.store_buffer = []       # buffer of data to be written into self.store_dir day files
     self.gzip_level = 9          # gzip compression level
-    self.store_time = timedelta(days=1024) # age of stored data files before they're removed
     self.zero_datetime = datetime.datetime.utcfromtimestamp(0) # 1970-01-01 00:00:00.000000 UTC
     self.zero_time = time(0,0,0,0,UTC()) # 00:00:00.000000 UTC
 
@@ -162,8 +154,7 @@ class Data:
     '''
     try to save the data
     '''
-    try : self.write()
-    except : pass
+    self.write()
 
   def append(self,*args,**kwargs):
     '''
@@ -176,12 +167,13 @@ class Data:
     '''
     write data to temporary storage location
     '''
-    self.temp_buffer.sort(key=lambda datum : datum['timestamp']) # sort data by timestamp
-    f = open(self.temp_file,'a')        # open file
-    for datum in self.temp_buffer:
-      f.write('%s\n' % saferepr(datum)) # write datum
-    f.close()                           # close file
-    del self.temp_buffer[:]             # clear data buffer
+    if len(self.temp_buffer) > 0:
+      self.temp_buffer.sort(key=lambda datum : datum['timestamp']) # sort data by timestamp
+      f = open(self.temp_file,'a')        # open file
+      for datum in self.temp_buffer:
+        f.write('%s\n' % saferepr(datum)) # write datum
+      f.close()                           # close file
+      del self.temp_buffer[:]             # clear data buffer
 
   def store(self):
     '''
@@ -190,7 +182,8 @@ class Data:
     collected into the corresponding day file
     '''
     # TODO: write data in DST 5kmlas bank format
-    for line in open(self.temp_file,'r'):    # read temp file contents into self.store_buffer
+    temp_f = open(self.temp_file,'r')        # open temp data file
+    for line in temp_f:                      # read temp file contents into self.store_buffer
       if isreadable(line) and len(line) > 0: # check readability of file contents
         self.store_buffer.append(eval(line)) # append contents to store_buffer
       else:
@@ -204,6 +197,7 @@ class Data:
     for date in self.store_files.keys():
       self.store_files[date].close()                         # close file objects
     del self.store_buffer[:]                                 # clear store buffer
+    temp_f.close()                                           # close temp data file
     os.remove(self.temp_file)                                # remove temp data file
 
   def rsync(self):
@@ -213,15 +207,15 @@ class Data:
     '''
     # TODO: the calibration run user should probably do this manually.  The SBC
     # has a DHCP server and I can serve the files over HTTP
-    # TODO: setup ssh keys
     for f in self.store_files:
       call(('/usr/bin/rsync','-q',self.store_dir,'tamember@<computer_name_here>:</path/to/rsync/dir/here/>'))
-    # TODO: remove old data files
 
   def _ensure_paths(self):
     '''
     ensure that self.temp_file exists and is a file and self.store_dir exist and is a directory
     '''
+    if not os.path.exists(self.temp_file):
+      f = open(self.temp_file,'w') ; f.close()
     if os.path.exists(self.temp_file) and not os.path.isfile(self.temp_file):
       raise OSError('Data temporary storage location, %s, is not a file.' % self.temp_file)
     if not os.path.exists(self.store_dir):
@@ -229,17 +223,16 @@ class Data:
     if not os.path.isdir(self.store_dir):
       raise OSError('Data storage location, %s, is not a directory.' % self.store_dir)
 
-
   def _get_store_file(self,date):
     '''
     open one gzipped storage file per the UTC day.  The particular files opened
     and used are determined by the timestamps of the data to be written
     '''
-    f_name = os.path.join(self.store_dir,'%s.gz' % date)              # file name
-    if os.path.exists(f_name) and not os.path.isfile(f_name):         # file exists and is not a regular file
+    f_name = os.path.join(self.store_dir,'%s.gz' % date)      # file name
+    if os.path.exists(f_name) and not os.path.isfile(f_name): # file exists and is not a regular file
       raise OSError('Data storage file, %s, is not a regular file.' % f_name)
     else:
-      return gzip.open(f_name,'a',self.gzip_level)                    # open as gzipped file
+      return gzip.open(f_name,'a',self.gzip_level)            # open as gzipped file
 
 # module abstract base classes #################################################
 
@@ -270,11 +263,12 @@ class SerialModule(Serial):
       self.communication_state = communication_state.error
       self.message = 'failed to read from serial device %s: %s' % (self.name,serial_exception)
       return '' # classes derived from SerialModule always expect a return value of str type
+    except SerialTimeoutException,timeout_exception:
+      self.communication_state = communication_state.timeout
+      self.message = 'failed to read from serial device %s: %s' % (self.name,timeout_exception)
+      return ''
 
   def write(self,data):
-    # sleeping before writing paces consecutive writes to the same device
-    # TODO: migrate to pyserial-2.6, which incorporates this idea into the writeTimeout parameter
-    sleep(self.timeout)
     try:
       self.communication_state = communication_state.success
       return super(SerialModule,self).write(data)
@@ -302,6 +296,13 @@ class ModbusModule(ModbusClient):
       self.message = 'failed to initialize %s modbus connection: %s' % (self.name,serial_exception)
       return
 
+  def read_device_identification(self,address,count=1,unit=0x00):
+    '''
+    this method is not defined in pymodbus
+    '''
+    request = ReadDeviceInformationRequest(address,count)
+    return request.decode(self.execute(request.encode()))
+
   # TODO: overload modbus methods and catch modbus errors here
   # try: except ModbusException:
 
@@ -325,7 +326,7 @@ class Charger(ModbusModule):
     self.message = ''                 # result message
     self._define_enums()
     self._define_bitfields()
-    super(Charger,self).__init__(method='rtu',port='/dev/tts/1',baudrate=9600,bytesize=8,parity='N',stopbits=2,timeout=1.5)
+    super(Charger,self).__init__(method='rtu',port='/dev/tts/1',baudrate=9600,bytesize=8,parity='N',stopbits=2,timeout=1.5,writeTimeout=1.5)
     self.set_conf_state()
 
   def set_conf_state(self): # TODO: read vendor name, etc.
@@ -545,10 +546,20 @@ class PTH(SerialModule):
     self.name = 'PTH board'     # PTH module name
     self.conf_message = ''      # state message
     self.message = ''           # result message
-    super(PTH,self).__init__(self.buffer_size,'/dev/ttyAM1',baudrate=9600,timeout=0.5)
+    super(PTH,self).__init__(self.buffer_size,'/dev/ttyAM1',baudrate=9600,timeout=0.5,writeTimeout=0.5)
     self.write('ECHO 0\r\n') # disable PTH-side serial echo
     self.read()              # clear output buffer
     self.set_conf_state()
+
+  def __del__(self):
+    '''
+    This is a redundant backup powerdown in the case that
+    Control.auto_shutdown() is not called or completed.  All exceptions should
+    be caught in main(), but if they aren't, then there is no guarantee that
+    RPC.__del__() will be called before PTH__del__().  This is only problematic
+    because the RPC returns to the state it was in before it was powered off.
+    '''
+    self.off_all() # open all PTH switches
 
   def set_conf_state(self):
     self.write('VER\r\n')                         # check PTH initialized
@@ -586,6 +597,11 @@ class PTH(SerialModule):
       module.message = '%s is on PTH switch %s' % (module.name,module.PTH_switch)
       module.message += '\nPTH message: "%s"' % module.PTH_message
       module.message += '\nPTH message should be: "%s"' % module.PTH_off_command
+
+  def off_all(self): # close all PTH switches without verification
+    self.write('RMON 0\r\n') # power off rain monitor
+    self.write('HEAT 0\r\n') # power off heater
+    self.write('OUT 0\r\n')  # power off all other switches
 
   def set_power_state(self,module=None):
     if re.search(r'%s' % module.PTH_on_command,module.PTH_message,re.M):
@@ -697,15 +713,21 @@ class RPC(SerialModule,PowerModule):
     self.name = 'RPC module' # RPC module name
     self.conf_message = ''   # state message
     self.message = ''        # result message
-    # TODO: tune additional serial parameters
-    super(RPC,self).__init__(self.buffer_size,'/dev/tts/2',baudrate=9600,timeout=1)
+    # TODO: specify additional serial parameters
+    super(RPC,self).__init__(self.buffer_size,'/dev/tts/2',baudrate=9600,timeout=1,writeTimeout=1)
     self.set_conf_state()
 
+  def __del__(self):
+    '''
+    See comment in PTH.__del__().
+    '''
+    self.off_all() # power off all outlets
+
   def set_conf_state(self):
-    self.write('\r')                            # prompt the RPC
-    self.conf_message = self.read()             # init message
+    self.write('\r')                                    # prompt the RPC
+    self.conf_message = self.read()                     # init message
     if re.search(r'Circuit Breaker',self.conf_message): # parse message for 'Circuit Breaker'
-      self.conf_state = conf_state.initialized  # module conf state
+      self.conf_state = conf_state.initialized          # module conf state
       self.message = 'RPC initialized.'
       self.message += '\nRPC message:\n"%s"' % self.conf_message
     else: # not a BayTech RPC, no RPC present, or if RPC prints out a message, the message doesn't contain 'Circuit Breaker'
@@ -739,7 +761,11 @@ class RPC(SerialModule,PowerModule):
     else:                                      # module failed to power off
       module.message = '%s is on RPC outlet %s' % (module.name,module.RPC_outlet)
       module.message += '\nRPC message:\n"%s"\n' % module.RPC_message
-      module.message += '\nRPC message should contain: "%d)...Outlet %d  : On"' % (module.RPC_outlet,module.RPC_outlet)
+      module.message += '\nRPC message should contain: "%d)...Outlet %d  : Off"' % (module.RPC_outlet,module.RPC_outlet)
+
+  def off_all(self): # power off all RPC outlets without verification
+    self.write('OFF\r') # power off all RPC outlets
+    self.write('Y\r')   # confirm power off
 
   def set_power_state(self,module=None):
     if re.search(r'^.*Outlet\s+%d\s+:\s+On.*$' % module.RPC_outlet,module.RPC_message,re.M):
@@ -782,7 +808,7 @@ class Radiometer(SerialModule,PowerModule):
   def init(self): # hardware init
     self.buffer_size = 65536 # = 2**2**2**2 : termios read buffer size
     # TODO: figure out how long the timeout needs to be to capture 5 m worth of radiometer data
-    super(Radiometer,self).__init__(self.buffer_size,'/dev/tts/3',baudrate=9600,timeout=1)
+    super(Radiometer,self).__init__(self.buffer_size,'/dev/tts/3',baudrate=9600,timeout=1.2,writeTimeout=1.2)
     # the radiometer needs a timeout between consecutive commands
     self.write('TG 1\r')     # internal trigger
     self.write('SS 0\r')     # no single shot
@@ -792,7 +818,7 @@ class Radiometer(SerialModule,PowerModule):
     #self.flushOutput()      # doesn't work when run from SBC
     self.read()              # clear output buffer
     self.set_conf_state()
-    self.write('AD\r')       # ASCII dump
+    self.write('AD\r')       # setup ASCII dump mode
 
   def set_conf_state(self):
     self.write('ST\r')                      # check error status
@@ -800,12 +826,11 @@ class Radiometer(SerialModule,PowerModule):
     if re.search(r'0',self.conf_message):   # if no errors
       self.conf_state = conf_state.initialized
       self.message = 'radiometer returned error status "0", no error'
-    else: # TODO: try to figure out how to get radiometer into 0 (no) error state every time
+    else:
       self.conf_state = conf_state.error
-      #self.conf_state = conf_state.initialized
       self.message = 'radiometer returned error status "%s"' % self.conf_message
 
-  def read_data(self):
+  def collect_datum(self):
     energies = []
     for i in re.split(r'\s+',self.read()):
       try: # only return the numbers from the radiometer message
@@ -932,13 +957,14 @@ class Control:
   any data is sent/received to/from them, pymodbus/pyserial will handle and
   report those errors, which will be intercepted by the control module.
 
-  The control process has three phases: init, run, and final.  Depending on the
+  The control process has three phases: init, collect, and final.  Depending on the
   phase and module, the control module may fail in a different manner.
   '''
 
   def __init__(self):
     self.phase = phase.undefined
     # create submodule stubs
+    self.data = None
     self.charger = None
     self.PTH = None
     self.rain = None
@@ -951,17 +977,6 @@ class Control:
     # create list for modules that won't turn off
     self.modules_no_off = []
 
-  def __del__(self): # TODO: this function gets called when the interpreter crashes or is killed by the user
-    self.phase = phase.final
-    log.report('done running\n',color=log.GRAY)
-    # since __del__ execution occurs when the python interpreter is
-    # self-destructing, we will hazard issuing these statements without checking
-    # whether they succeed or trigger any errors
-    try : control.PTH.off(module=self.heater) # power off heater module
-    except : pass
-    try : control.PTH.off(module=self.rain)   # power off rain monitor
-    except : pass
-
   # state checks
   def check_conf_state(self,desired_state,module=None):
     if module.conf_state == desired_state:
@@ -970,11 +985,11 @@ class Control:
     elif module.conf_state == conf_state.undefined:
       log.inform('failed\n',color=log.RED)
       log.inform('%s\n' % module.message)
-      self.shutdown()
+      self.auto_shutdown()
     elif module.conf_state == conf_state.error:
       log.inform('error\n',color=log.RED)
       log.inform('%s\n' % module.message)
-      self.shutdown()
+      self.auto_shutdown()
 
   def check_power_state(self,desired_state,module=None):
     if module.power_state == desired_state:
@@ -983,7 +998,7 @@ class Control:
     else:
       log.inform('failed\n',color=log.RED)
       log.inform('%s\n' % module.message)
-      self.shutdown(module_no_off=module)
+      self.auto_shutdown(module_no_off=module)
 
   def check_rain_state(self,module=None):
     if module.rain_state == rain_state.dry:
@@ -993,12 +1008,12 @@ class Control:
       log.report('wet\n',color=log.BLUE)
       log.report('%s\n' % module.message)
       if self.phase != phase.final:
-        self.shutdown()
+        self.auto_shutdown()
     elif module.rain_state == rain_state.open:
       log.report('open\n',color=log.YELLOW)
       log.report('%s\n' % module.message)
       if self.phase != phase.final:
-        #self.shutdown() # TODO: get rain sensor from Jeremy
+        #self.auto_shutdown() # TODO: get rain sensor working
         self.off_rain()
 
   def check_communication_state(self,module=None):
@@ -1006,27 +1021,23 @@ class Control:
       return # serial module successfully written to or read from
     elif module.communication_state == communication_state.error:
       log.inform('error\n',color=log.RED)
-      self.shutdown()
+      self.auto_shutdown()
     elif module.communication_state == communication_state.timeout:
       log.inform('timeout\n',color=log.RED)
-      self.shutdown()
+      self.auto_shutdown()
 
-  def shutdown(self,module_no_off=None):
+  def auto_shutdown(self,module_no_off=None):
     '''
-    To avoid an open loop, we will not try to final or power off any module
-    that won't do so.
+    To avoid an open loop, we will not try to power off any module that won't
+    do so.
     '''
-    # TODO: update this function in cocordance with self.__del__()
     if module_no_off:
       self.modules_no_off.append(module_no_off)
     self.verbosity = verbosity.verbose
     log.inform('\nshutting down 5kmlas\n',color=log.RED)
-    # if laser module is initialized and isn't the module that won't turn off
     if self.laser and not self.laser in self.modules_no_off:
       if self.laser.power_state == power_state.on:
-        self.off_laser()
-        self.read_radiometer_data() # if the laser is on, then there may be some data
-        self.data.write()           # try to save whatever data we have
+        self.off_laser() # power off if laser module is initialized, isn't a module that won't turn off, and is on
     if self.shutter and not self.shutter in self.modules_no_off:
       if self.shutter.power_state == power_state.on:
         self.off_shutter()
@@ -1054,7 +1065,7 @@ class Control:
       log.report('writing data ... ')
     else:
       log.detail('writing data ... ')
-    self.data.write() # format and save data to temporary storage location
+    self.data.write()                 # format and save data to temporary storage location
     # TODO: check write state
     if self.phase == phase.final:
       log.report('done\n',color=log.GREEN)
@@ -1063,7 +1074,7 @@ class Control:
 
   def store_data(self):
     log.report('storing data ... ')
-    self.data.store()
+    self.data.store()               # store data to local data storage flash memory
     # TODO: check store state
     log.report('done\n',color=log.GREEN)
 
@@ -1091,15 +1102,16 @@ class Control:
 
   def final_charger(self):
     log.report('finalizing charger modbus interface ... ')
-    self.charger.close() # final charger
+    self.charger.close()                                   # final charger
     log.report('done\n',color=log.GREEN)
 
   # PTH commands
   def init_PTH(self):
     log.report('initializing PTH board ... ')
-    self.PTH = PTH()                        # init PTH board
-    self.check_communication_state(module=self.PTH) # check write state
-    self.check_conf_state(conf_state.initialized,module=self.PTH)  # check PTH init state
+    self.PTH = PTH()                                              # init PTH board
+    self.PTH.off_all()                                            # open all switches
+    self.check_communication_state(module=self.PTH)               # check write state
+    self.check_conf_state(conf_state.initialized,module=self.PTH) # check PTH init state
 
   def on_rain(self):
     log.report('powering on rain monitor ... ')
@@ -1110,34 +1122,34 @@ class Control:
 
   def off_rain(self):
     log.report('powering off rain monitor ... ')
-    self.PTH.off(module=self.rain)          # power off rain monitor module
-    self.check_communication_state(module=self.PTH) # check write state
-    self.check_power_state(power_state.off,module=self.rain)  # check rain monitor init state
+    self.PTH.off(module=self.rain)                           # power off rain monitor module
+    self.check_communication_state(module=self.PTH)          # check write state
+    self.check_power_state(power_state.off,module=self.rain) # check rain monitor init state
 
   def on_heater(self):
     log.report('powering on heater ... ')
-    self.heater = Heater()                  # create object for heater module
-    self.PTH.on(module=self.heater)         # power on heater module
-    self.check_communication_state(module=self.PTH) # check write state
+    self.heater = Heater()                                    # create object for heater module
+    self.PTH.on(module=self.heater)                           # power on heater module
+    self.check_communication_state(module=self.PTH)           # check write state
     self.check_power_state(power_state.on,module=self.heater) # check heater power state
 
   def off_heater(self):
     log.report('powering off heater ... ')
-    self.PTH.off(module=self.heater)         # power off heater module
-    self.check_communication_state(module=self.PTH)  # check write state
+    self.PTH.off(module=self.heater)                           # power off heater module
+    self.check_communication_state(module=self.PTH)            # check write state
     self.check_power_state(power_state.off,module=self.heater) # check heater power state
 
   def on_inverter(self):
     log.report('powering on inverter ... ')
-    self.inverter = Inverter()                # create object for inverter module
-    self.PTH.on(module=self.inverter)         # power on inverter module
-    self.check_communication_state(module=self.PTH)   # check write state
+    self.inverter = Inverter()                                  # create object for inverter module
+    self.PTH.on(module=self.inverter)                           # power on inverter module
+    self.check_communication_state(module=self.PTH)             # check write state
     self.check_power_state(power_state.on,module=self.inverter) # check inverter power state
 
   def off_inverter(self):
     log.report('powering off inverter ... ')
-    self.PTH.off(module=self.inverter)         # power off inverter module
-    self.check_communication_state(module=self.PTH)    # check write state
+    self.PTH.off(module=self.inverter)                           # power off inverter module
+    self.check_communication_state(module=self.PTH)              # check write state
     self.check_power_state(power_state.off,module=self.inverter) # check inverter power state
 
   def poll_rain(self):
@@ -1157,74 +1169,75 @@ class Control:
 
   def final_PTH(self):
     log.report('finalizing PTH board ... ')
-    self.PTH.close() # final PTH
+    self.PTH.close()                        # final PTH
     log.report('done\n',color=log.GREEN)
 
   # RPC commands
   def init_RPC(self):
     log.report('initializing RPC module ... ')
-    self.RPC = RPC()                        # init RPC module
-    self.check_conf_state(conf_state.initialized,module=self.RPC)  # check RPC init state
+    self.RPC = RPC()                                              # init RPC module
+    self.RPC.off_all()                                            # power off all outlets
+    self.check_conf_state(conf_state.initialized,module=self.RPC) # check RPC init state
 
   def on_radiometer(self):
     log.report('powering on radiometer ... ')
-    self.radiometer = Radiometer()                # create object for radiometer module
-    self.RPC.on(module=self.radiometer)           # power on radiometer module
-    self.check_communication_state(module=self.RPC) # check write state
-    self.check_power_state(power_state.on,module=self.radiometer)   # check radiometer power state
+    self.radiometer = Radiometer()                                # create object for radiometer module
+    self.RPC.on(module=self.radiometer)                           # power on radiometer module
+    self.check_communication_state(module=self.RPC)               # check write state
+    self.check_power_state(power_state.on,module=self.radiometer) # check radiometer power state
 
   def off_radiometer(self):
     log.report('powering off radiometer ... ')
-    self.RPC.off(module=self.radiometer)           # power off radiometer module
-    self.check_communication_state(module=self.RPC) # check write state
-    self.check_power_state(power_state.off,module=self.radiometer)   # check radiometer power state
+    self.RPC.off(module=self.radiometer)                           # power off radiometer module
+    self.check_communication_state(module=self.RPC)                # check write state
+    self.check_power_state(power_state.off,module=self.radiometer) # check radiometer power state
 
   def on_shutter(self):
     log.report('opening shutter ... ')
-    self.shutter = Shutter()                 # create object for shutter module
-    self.RPC.on(module=self.shutter)         # power on shutter module
-    self.check_communication_state(module=self.RPC) # check write state
+    self.shutter = Shutter()                                   # create object for shutter module
+    self.RPC.on(module=self.shutter)                           # power on shutter module
+    self.check_communication_state(module=self.RPC)            # check write state
     self.check_power_state(power_state.on,module=self.shutter) # check shutter power state
 
   def off_shutter(self):
     log.report('closing shutter ... ')
-    self.RPC.off(module=self.shutter)         # power off shutter module
-    self.check_communication_state(module=self.RPC) # check write state
+    self.RPC.off(module=self.shutter)                           # power off shutter module
+    self.check_communication_state(module=self.RPC)             # check write state
     self.check_power_state(power_state.off,module=self.shutter) # check shutter power state
 
   def on_laser(self):
     log.report('  powering on laser ... ')
-    self.laser = Laser()                   # create object for laser module
-    self.RPC.on(module=self.laser)         # power on laser module
-    self.check_communication_state(module=self.RPC) # check write state
+    self.laser = Laser()                                     # create object for laser module
+    self.RPC.on(module=self.laser)                           # power on laser module
+    self.check_communication_state(module=self.RPC)          # check write state
     self.check_power_state(power_state.on,module=self.laser) # check laser power state
 
   def off_laser(self):
     log.report('  powering off laser ... ')
-    self.RPC.off(module=self.laser)         # power off laser
-    self.check_communication_state(module=self.RPC) # check write state
+    self.RPC.off(module=self.laser)                           # power off laser
+    self.check_communication_state(module=self.RPC)           # check write state
     self.check_power_state(power_state.off,module=self.laser) # check laser power state
 
   def final_RPC(self):
     log.report('finalizing RPC module ... ')
-    self.RPC.close()
+    self.RPC.close()                         # final RPC
     log.report('done\n',color=log.GREEN)
 
   # radiometer commands
   def init_radiometer(self):
     log.report('initializing radiometer ... ')
-    self.radiometer.init()                         # init radiometer module
-    self.check_communication_state(module=self.radiometer) # check write state
-    self.check_conf_state(conf_state.initialized,module=self.radiometer)  # check radiometer conf state
+    self.radiometer.init()                                               # init radiometer module
+    self.check_communication_state(module=self.radiometer)               # check write state
+    self.check_conf_state(conf_state.initialized,module=self.radiometer) # check radiometer conf state
 
-  def read_radiometer_data(self):
-    radiometer_datum = self.radiometer.read_data()
-    self.check_communication_state(module=self.radiometer)
-    self.data.append(radiometer_datum=radiometer_datum)
+  def collect_radiometer_datum(self):
+    radiometer_datum = self.radiometer.collect_datum()     # read radiometer datum
+    self.check_communication_state(module=self.radiometer) # check write state
+    self.data.append(radiometer_datum=radiometer_datum)    # add datum to data
 
   def final_radiometer(self):
     log.report('finalizing radiometer ... ')
-    self.radiometer.close()
+    self.radiometer.close()                  # final radiometer
     log.report('done\n',color=log.GREEN)
 
 class Operator(object):
@@ -1238,27 +1251,21 @@ class Operator(object):
 
   def _list_proc_cmds(self):
     '''
-    queries the system for the invocations of all processes
+    query the system for the invocations of all processes
     '''
     pids = [pid for pid in os.listdir('/proc') if pid.isdigit()]
-    cmdlines = []
-    for pid in pids:
-      f = open(os.path.join('/proc',pid,'cmdline'),'rb')
-      cmdlines.append(f.read())
-      f.close()
-    return cmdlines
+    return [open(os.path.join('/proc',pid,'cmdline'),'rb').read() for pid in pids]
 
   def _find_instances(self):
     '''
-    finds instances of 5kmlas_ctl in system process list
+    find instances of 5kmlas_ctl in system process list
     '''
-    instances = {'daemon-read':0,'daemon-write':0,'calibrator':0,'runner':0}
+    instances = {'poll':0,'store':0,'run':0}
     for cmd in self._list_proc_cmds():
-      if re.search(r'5kmlas_ctl.*daemon-read',cmd) :    instances['daemon-read'] += 1
-      elif re.search(r'5kmlas_ctl.*daemon-write',cmd) : instances['daemon-write'] += 1
-      elif re.search(r'5kmlas_ctl.*calibrator',cmd) :   instances['calibrator'] += 1
-      elif re.search(r'5kmlas_ctl.*runner',cmd) :       instances['runner'] += 1
-      elif re.search(r'5kmlas_ctl',cmd) :               instances['runner'] += 1
+      if re.search(r'5kmlas_ctl.*poll',cmd) :        instances['poll'] += 1
+      elif re.search(r'5kmlas_ctl.*store',cmd) :     instances['store'] += 1
+      elif re.search(r'5kmlas_ctl.*calibrate',cmd) : instances['run'] += 1
+      elif re.search(r'5kmlas_ctl.*run',cmd) :       instances['run'] += 1
     return instances
 
 class Daemon(Operator):
@@ -1271,50 +1278,43 @@ class Daemon(Operator):
   all data stored in temp storage to data store and rsyncs it to Middle Drum
   '''
 
-  def __init__(self,mode):
-    '''
-    check to make sure that this process is the only 5kmlas_ctl process
-    '''
-    self.mode = mode
-    instances = self._find_instances()
-    if instances['calibrator'] > 0:
-      sys.exit(0) # do not poll hardware or process data when calibrating
-    if instances['runner'] > 0:
+  def __init__(self,control,mode):
+    self.control = control             # control module
+    self.mode = mode                   # run mode either poll or store
+    instances = self._find_instances() # check to make sure that this process is the only 5kmlas_ctl process
+    if instances['run'] > 0:
       sys.exit(0) # do not poll hardware or process data when running
-    if instances['daemon-read'] > 0:
-      if instances['daemon-read'] > 1 and self.mode == daemon_mode.read:
-        raise OSError('%d other `5kmlas_ctl daemon-read` process(es) {is|are} running.  Only one instance of `5kmlas_ctl daemon-{read|write}` should run at a time.' % instances['daemon-read'])
-      elif self.mode == daemon_mode.write:
-        raise OSError('%d other `5kmlas_ctl daemon-read` process(es) {is|are} running.  Only one instance of `5kmlas_ctl daemon-{read|write}` should run at a time.' % instances['daemon-read'])
-    if instances['daemon-write'] > 0:
-      if instances['daemon-write'] > 1 and self.mode == daemon_mode.write:
-        raise OSError('%d other `5kmlas_ctl daemon-write` process(es) {is|are} running.  Only one instance of `5kmlas_ctl daemon-{read|write}` should run at a time.' % instances['daemon-write'])
-      elif self.mode == daemon_mode.read:
-        raise OSError('%d other `5kmlas_ctl daemon-write` process(es) {is|are} running.  Only one instance of `5kmlas_ctl daemon-{read|write}` should run at a time.' % instances['daemon-write'])
+    if instances['poll'] > 0:
+      if instances['poll'] > 1 and self.mode == run_mode.poll:
+        raise OSError('%d other `5kmlas_ctl poll` process(es) running: only one instance of `5kmlas_ctl` should run at a time.' % instances['poll'])
+      elif self.mode == run_mode.store:
+        raise OSError('%d other `5kmlas_ctl poll` process(es) running: only one instance of `5kmlas_ctl` should run at a time.' % instances['poll'])
+    if instances['store'] > 0:
+      if instances['store'] > 1 and self.mode == run_mode.store:
+        raise OSError('%d other `5kmlas_ctl store` process(es) running: only one instance of `5kmlas_ctl` should run at a time.' % instances['store'])
+      elif self.mode == run_mode.poll:
+        raise OSError('%d other `5kmlas_ctl store` process(es) running: only one instance of `5kmlas_ctl` should run at a time.' % instances['store'])
 
-  def run(self,control):
-#    try: # try to shutdown in case of any error
-      control.phase = phase.init
-      control.init_data()                # init data structure
-      if self.mode == daemon_mode.read:  # poll data
-        control.init_charger()           # init charger
-        control.init_PTH()               # init PTH board
-        control.on_rain()                # power on rain monitor
-        control.poll_rain()              # check rain state
-        control.phase = phase.run
-        control.collect_charger_datum()  # collect charger,
-        control.collect_PTH_datum()      # PTH data
-        control.write_data()             # write data
-        control.phase = phase.final
-        control.off_rain()               # power off rain monitor
-      if self.mode == daemon_mode.write: # collate data into UTC day files
-        control.phase = phase.run
-        control.store_data()             # collate and store data
-        control.phase = phase.final      # nothing is finalized in daemon-write mode
-#    except Exception,exception:
-#      log.inform('5kmlas_ctl encountered an error: %s.\n' % exception,color=log.RED)
-#      control.write_data()               # try to save any data
-#      control.shutdown()
+  def run(self):
+    self.control.phase = phase.init
+    self.control.init_data()                # init data structure
+    if self.mode == run_mode.poll:          # poll data
+      self.control.init_charger()           # init charger
+      self.control.init_PTH()               # init PTH board
+      self.control.on_rain()                # power on rain monitor
+      self.control.poll_rain()              # check rain state
+      self.control.phase = phase.collect
+      self.control.collect_charger_datum()  # collect charger,
+      self.control.collect_PTH_datum()      # PTH data
+      self.control.write_data()             # write data
+      self.control.phase = phase.final
+      self.control.off_rain()               # power off rain monitor
+      self.control.final_PTH()              # final PTH
+      self.control.final_charger()          # final charger
+    if self.mode == run_mode.store:         # collate data into gzipped UTC day files
+      self.control.phase = phase.collect
+      self.control.store_data()             # collate and store data
+      self.control.phase = phase.final      # nothing is finalized in store mode
 
 class Runner(Operator):
   '''
@@ -1322,80 +1322,72 @@ class Runner(Operator):
 
   Runner interfaces with the Control module, which handles state checking and
   automatic shut down in case of error.  The runner object performs a
-  scripted routine.  It is initiated either from Middle Drum or as part of a
-  local calibration run.
+  scripted routine.
   '''
 
-  def __init__(self):
-    '''
-    check to make sure that this process is the only 5kmlas_ctl process
-    '''
-    wait_time = 30 # time to wait [s] for a daemon process to finish before proceeding
-    while True:
+  def __init__(self,control):
+    self.control = control # control module
+    self.start_time = None # time of run start
+    self.stop_time = None  # time of run stop
+    wait_time = 30         # time to wait [s] for a daemon process to finish before proceeding
+    while True: # check that this is the only 5kmlas_ctl process
       instances = self._find_instances()
-      if instances['daemon-read'] > 0:
-        log.inform('A `5kmlas_ctl daemon-read` process is running: waiting %d s for it to finish.\n' % wait_time)
+      if instances['poll'] > 0:
+        log.inform('A `5kmlas_ctl poll` process is running: waiting %d s for it to finish.\n' % wait_time)
         sleep(wait_time)
-      elif instances['daemon-write'] > 0:
-        log.inform('A `5kmlas_ctl daemon-write` process is running: waiting %d s for it to finish.\n' % wait_time)
+      elif instances['store'] > 0:
+        log.inform('A `5kmlas_ctl store` process is running: waiting %d s for it to finish.\n' % wait_time)
         sleep(wait_time)
-      elif instances['calibrator'] > 0:
-        raise OSError('%d other `5kmlas_ctl calibrator` process(es) {is|are} running.  Only one instance of `5kmlas_ctl {runner|calibrator}` should run at a time.\n' % instances['calibrator'])
-      elif instances['runner'] > 1: # this is a runner process
-        raise OSError('%d other `5kmlas_ctl runner` process(es) {is|are} running.  Only one instance of `5kmlas_ctl {runner|calibrator}` should run at a time.\n' % instances['runner'])
+      elif instances['run'] > 1: # this is a run process
+        raise OSError('%d other `5kmlas_ctl run` process(es) running: only one instance of `5kmlas_ctl` should run at a time.\n' % instances['run'])
       else:
         break # this is the only `5kmlas_ctl` process running
 
-  def run(self,control):
-#    try: # try to shutdown in case of any error
-      control.phase = phase.init
-      control.init_data()       # init data structure
-      control.init_charger()    # init charger
-      control.init_PTH()        # init PTH board
-      control.on_rain()         # power on rain monitor
-      control.poll_rain()       # check rain state
-      control.on_heater()       # power on window heater
-      control.on_inverter()     # power on inverter
-      control.init_RPC()        # init RPC
-      control.on_radiometer()   # power on radiometer
-      control.init_radiometer() # init radiometer
-      control.on_shutter()      # power on shutter
+  def run(self,minutes=3):
+    self.control.phase = phase.init
+    self.control.init_data()       # init data structure
+    self.control.init_charger()    # init charger
+    self.control.init_PTH()        # init PTH board
+    self.control.on_rain()         # power on rain monitor
+    self.control.poll_rain()       # check rain state
+    self.control.on_heater()       # power on window heater
+    self.control.on_inverter()     # power on inverter
+    self.control.init_RPC()        # init RPC
+    self.control.on_radiometer()   # power on radiometer
+    self.control.init_radiometer() # init radiometer
+    self.control.on_shutter()      # power on shutter
 
-      control.phase = phase.run
-      log.report('collecting data\n',color=log.GRAY)
-      three_minutes = timedelta(minutes=3)
-      now = self.start_time = datetime.datetime.now(UTC()) # record laser on time
-      control.on_laser()                                   # power on laser
-      while (now < self.start_time + three_minutes):       # run for 3 m
-        control.collect_charger_datum()
-        control.collect_PTH_datum()
-        sleep(5)                                           # collect charger,PTH data every 5 s
-        now = datetime.datetime.now(UTC())                 # new timestamp
-      control.off_laser()                                  # power off laser
-      control.collect_charger_datum()                      # collect final charger datum
-      control.collect_PTH_datum()                          # collect final PTH datum
-      self.stop_time = datetime.datetime.now(UTC())        # record laser off time
-      log.report('done collecting\n',color=log.GRAY)
+    self.control.phase = phase.collect
+    log.report('collecting data\n',color=log.GRAY)
+    collect_time = timedelta(minutes=minutes)
+    now = self.start_time = datetime.datetime.now(UTC()) # record laser on time
+    self.control.on_laser()                              # power on laser
+    while (now < self.start_time + collect_time):        # collect for collect_time [min]
+      self.control.collect_charger_datum()
+      self.control.collect_PTH_datum()
+      sleep(5)                                           # collect charger,PTH data every 5 s
+      now = datetime.datetime.now(UTC())                 # new timestamp
+    self.control.off_laser()                             # power off laser
+    self.control.collect_charger_datum()                 # collect final charger datum
+    self.control.collect_PTH_datum()                     # collect final PTH datum
+    self.stop_time = datetime.datetime.now(UTC())        # record laser off time
+    log.report('done collecting\n',color=log.GRAY)
 
-      control.phase = phase.final
-      control.off_shutter()          # close shutter
-      control.data.append(start_datum={'timestamp':self.start_time,'type':'start'},
-          stop_datum={'timestamp':self.stop_time,'type':'stop'})
-      control.read_radiometer_data() # read radiometer data and append run times
-      control.write_data()           # write data
-      control.off_radiometer()       # power off radiometer
-      control.off_inverter()         # power off inverter
-      control.off_heater()           # power off window heater
-      control.off_rain()             # power off rain monitor
-      # print all data when verbose
-      log.detail('%s\n' % control.data)
-#    except Exception,exception:
-#      log.inform('5kmlas_ctl encountered an error: %s.\n' % exception,color=log.RED)
-#      control.write_data()               # try to save any data
-#      control.shutdown()
-
-class Calibrator(Operator):
-  pass # TODO: implement
+    self.control.phase = phase.final
+    self.control.off_shutter()              # close shutter
+    self.control.data.append(start_datum={'timestamp':self.start_time,'type':'start'},
+        stop_datum={'timestamp':self.stop_time,'type':'stop'})
+    self.control.collect_radiometer_datum() # read radiometer data and append run times
+    self.control.write_data()               # write data
+    self.control.final_radiometer()         # final radiometer
+    self.control.off_radiometer()           # power off radiometer
+    self.control.final_RPC()                # final RPC
+    self.control.off_inverter()             # power off inverter
+    self.control.off_heater()               # power off window heater
+    self.control.off_rain()                 # power off rain monitor
+    self.control.final_PTH()                # final PTH board
+    self.control.final_charger()            # final charger
+    log.detail('%s\n' % self.control.data)  # print all data when verbose
 
 # main #########################################################################
 
@@ -1404,7 +1396,7 @@ def parse_opts():
   handle invocation options and arguments
   '''
   usage = 'Usage: %prog [OPTIONS] MODE'
-  description = 'Run 5 km laser calibration system.\nMODE is any of "runner" - Middle Drum operations [default], "calibrator" - calibrate 5kmlas, "daemon-read" - poll PTH and charger data, or "daemon-write" - collate, store, and rsync data to Middle Drum.  "daemon-{read|write}" modes should only be invoked by cron.'
+  description = 'Run 5 km laser calibration system.  MODE is mandatory: "run" - Middle Drum operations [default], "calibrate" - calibrate 5kmlas, "poll" - poll PTH and charger data, "store" - collate and store data into one part per UTC day.  "poll" and "store" are usually only invoked by cron.'
   opt_parser = OptionParser(usage=usage,description=description,version='%prog-0.7.2')
   opt_parser.add_option('-c','--color',action='store_const',const=True,
       default=True,help='print messages in color [default]')
@@ -1438,45 +1430,46 @@ def parse_opts():
   if not opts.verbose and not opts.normal and not opts.quiet:
     opts.normal = True
 
-  # handle run mode argument, default mode is runner
-  if len(args) == 0:
-    args.append(run_mode.runner)
-  elif len(args) == 1:
-    if   args[0] == 'daemon-read'  : args[0] = run_mode.daemon ; args.append(daemon_mode.read)
-    elif args[0] == 'daemon-write' : args[0] = run_mode.daemon ; args.append(daemon_mode.write)
-    elif args[0] == 'runner'       : args[0] = run_mode.runner
-    elif args[0] == 'calibrator'   : args[0] = run_mode.calibrator
+  # handle run mode argument
+  if len(args) == 1:
+    if   args[0] == 'poll'      : args[0] = run_mode.poll
+    elif args[0] == 'store'     : args[0] = run_mode.store
+    elif args[0] == 'run'       : args[0] = run_mode.run
+    elif args[0] == 'calibrate' : args[0] = run_mode.calibrate
     else:
       opt_parser.print_usage()
       print opt_parser.expand_prog_name('%%prog: invalid MODE: %s.  Use "%%prog -h" for help.' % args[0])
       sys.exit(1)
-  elif len(args) > 1:
+  elif len(args) != 1:
     opt_parser.print_usage()
-    print opt_parser.expand_prog_name('%prog: please specify exactly one or zero MODEs.  Use "%prog -h" for help.')
+    print opt_parser.expand_prog_name('%prog: please specify exactly one MODE.  Use "%prog -h" for help.')
     sys.exit(1)
 
   return opts,args
 
 def main():
   opts,args = parse_opts()
-
-  log.init(opts)      # init logger
-  control = Control() # init control module
-  if args[0] == run_mode.daemon: # daemon mode
-    daemon = Daemon(args[1])
-    daemon.run(control)
-  elif args[0] == run_mode.runner: # running mode
-    runner = Runner()
-    runner.run(control)
-  elif args[0] == run_mode.calibrator: # calibration mode
-    calibrator = Runner() # TODO: create calibration mode
-    calibrator.run(control)
-
-if __name__ == '__main__':
-  try:
-    main()
+  log.init(opts)                         # init logger
+  control = Control()                    # init control module
+  try: # catch any errors here and shutdown modules gracefully
+    if args[0] == run_mode.poll or args[0] == run_mode.store:
+      daemon = Daemon(control,args[0])   # daemon mode
+      daemon.run()
+    elif args[0] == run_mode.run:
+      runner = Runner(control)           # running mode
+      runner.run(3)                      # run for 3 minutes
+    elif args[0] == run_mode.calibrate:
+      calibrator = Runner(control)       # calibration mode
+      calibrator.run(5)                  # run for 5 minutes
+      log.inform('\n\nPlease run `5kmlas_ctl store` before copying data from system.\n\n')
   except KeyboardInterrupt:
-    sys.exit(0)
+    sys.exit(0)                          # user cancel
   except OSError,oserror:
     print oserror
-    sys.exit(1)
+    sys.exit(1)                          # system error
+  except BaseException,exception:
+    log.inform('5kmlas_ctl encountered an error: %s.\n' % exception,color=log.RED)
+    control.write_data()                 # try to save any data
+    control.auto_shutdown()              # shutdown gracefully
+
+if __name__ == '__main__' : main()
