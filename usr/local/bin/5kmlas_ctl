@@ -12,6 +12,7 @@
 # - mount root of USB system readonly
 # - ensure cron is started in USB system during bootup
 # - sync system clock with Middle Drum at the beginning of each run (or just first run of the night)
+# - make 65536 default SerialDevice buffer size and change buffer size to a kw argument
 
 # A module is a discrete, active component of the 5kmlas system.  It consists
 # of either a physical unit and a corresponding python class/object singleton or
@@ -119,7 +120,7 @@ rain_state = Enum('undefined dry wet open')
 # serial states
 communication_state = Enum('undefined success error timeout')
 # run modes
-run_mode = Enum('run calibrate poll store')
+run_mode = Enum('run darkbox calibrate poll store')
 
 # for some reason, I have to implement UTC
 class UTC(tzinfo):
@@ -1389,6 +1390,45 @@ class Runner(Operator):
     self.control.final_charger()            # final charger
     log.detail('%s\n' % self.control.data)  # print all data when verbose
 
+class DarkBox(Runner):
+  '''
+  Run parts of 5kmlas system in a dark box on campus in the JFB B39b optics
+  lab.  This class will be modified as necessary.
+  '''
+
+  def run(self,minutes=3):
+    self.control.phase = phase.init
+    self.control.init_data()       # init data structure
+    self.control.init_PTH()        # init PTH board
+    self.control.init_RPC()        # init RPC
+    self.control.on_radiometer()   # power on radiometer
+    self.control.init_radiometer() # init radiometer
+
+    self.control.phase = phase.collect
+    log.report('collecting data\n',color=log.GRAY)
+    collect_time = timedelta(minutes=minutes)
+    now = self.start_time = datetime.datetime.now(UTC()) # record laser on time
+    self.control.on_laser()                              # power on laser
+    while (now < self.start_time + collect_time):        # collect for collect_time [min]
+      self.control.collect_PTH_datum()
+      sleep(3)                                           # collect charger,PTH data every 3 s
+      now = datetime.datetime.now(UTC())                 # new timestamp
+    self.control.off_laser()                             # power off laser
+    self.control.collect_PTH_datum()                     # collect final PTH datum
+    self.stop_time = datetime.datetime.now(UTC())        # record laser off time
+    log.report('done collecting\n',color=log.GRAY)
+
+    self.control.phase = phase.final
+    self.control.data.append(start_datum={'timestamp':self.start_time,'type':'start'},
+        stop_datum={'timestamp':self.stop_time,'type':'stop'})
+    self.control.collect_radiometer_datum() # read radiometer data and append run times
+    self.control.write_data()               # write data
+    self.control.final_radiometer()         # final radiometer
+    self.control.off_radiometer()           # power off radiometer
+    self.control.final_RPC()                # final RPC
+    self.control.final_PTH()                # final PTH board
+    log.detail('%s\n' % self.control.data)  # print all data when verbose
+
 # main #########################################################################
 
 def parse_opts():
@@ -1396,7 +1436,7 @@ def parse_opts():
   handle invocation options and arguments
   '''
   usage = 'Usage: %prog [OPTIONS] MODE'
-  description = 'Run 5 km laser calibration system.  MODE is mandatory: "run" - Middle Drum operations [default], "calibrate" - calibrate 5kmlas, "poll" - poll PTH and charger data, "store" - collate and store data into one part per UTC day.  "poll" and "store" are usually only invoked by cron.'
+  description = 'Run 5 km laser calibration system.  MODE is mandatory: "run" - Middle Drum operations [default], "darkbox" - dark box testing, "calibrate" - calibrate 5kmlas, "poll" - poll PTH and charger data, "store" - collate and store data into one part per UTC day.  "poll" and "store" are usually only invoked by cron.'
   opt_parser = OptionParser(usage=usage,description=description,version='%prog-0.7.2')
   opt_parser.add_option('-c','--color',action='store_const',const=True,
       default=True,help='print messages in color [default]')
@@ -1435,6 +1475,7 @@ def parse_opts():
     if   args[0] == 'poll'      : args[0] = run_mode.poll
     elif args[0] == 'store'     : args[0] = run_mode.store
     elif args[0] == 'run'       : args[0] = run_mode.run
+    elif args[0] == 'darkbox'   : args[0] = run_mode.darkbox
     elif args[0] == 'calibrate' : args[0] = run_mode.calibrate
     else:
       opt_parser.print_usage()
@@ -1458,18 +1499,24 @@ def main():
     elif args[0] == run_mode.run:
       runner = Runner(control)           # running mode
       runner.run(3)                      # run for 3 minutes
+    elif args[0] == run_mode.darkbox:
+      darkbox = DarkBox(control)         # darkbox mode
+      darkbox.run(10)                    # run for 10 minutes
     elif args[0] == run_mode.calibrate:
       calibrator = Runner(control)       # calibration mode
       calibrator.run(5)                  # run for 5 minutes
       log.inform('\n\nPlease run `5kmlas_ctl store` before copying data from system.\n\n')
   except KeyboardInterrupt:
+    control.auto_shutdown()              # shutdown gracefully
     sys.exit(0)                          # user cancel
   except OSError,oserror:
     print oserror
+    control.auto_shutdown()              # shutdown gracefully
     sys.exit(1)                          # system error
   except BaseException,exception:
     log.inform('5kmlas_ctl encountered an error: %s.\n' % exception,color=log.RED)
     control.write_data()                 # try to save any data
     control.auto_shutdown()              # shutdown gracefully
+    sys.exit(2)                          # other error
 
 if __name__ == '__main__' : main()
