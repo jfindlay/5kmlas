@@ -603,6 +603,7 @@ class PTH(SerialModule):
     self.write('RMON 0\r\n') # power off rain monitor
     self.write('HEAT 0\r\n') # power off heater
     self.write('OUT 0\r\n')  # power off all other switches
+    self.read()              # clear output
 
   def set_power_state(self,module=None):
     if re.search(r'%s' % module.PTH_on_command,module.PTH_message,re.M):
@@ -737,21 +738,23 @@ class RPC(SerialModule,PowerModule):
       self.message += '\nRPC message:\n"%s"' % self.conf_message
 
   def on(self,module=None): # power on a RPC outlet
-    self.write('ON %d\r' % module.RPC_outlet)  # power on RPC outlet for module
-    self.write('Y\r')                          # confirm power on
-    module.RPC_message = self.read()           # capture RPC message
-    self.set_power_state(module=module)        # check powered on
-    if module.power_state == power_state.on:   # if module powered on
-      sleep(module.power_on_sleep)             # wait for module to stabilize
+    self.write('ON %d\r' % module.RPC_outlet) # power on RPC outlet for module
+    self.read()                               # clear output buffer
+    self.write('Y\r')                         # confirm power on
+    module.RPC_message = self.read()          # capture RPC message
+    self.set_power_state(module=module)       # check powered on
+    if module.power_state == power_state.on:  # if module powered on
+      sleep(module.power_on_sleep)            # wait for module to stabilize
       module.message = '%s is on RPC outlet %s' % (module.name,module.RPC_outlet)
       module.message += '\nRPC message:\n"%s"' % module.RPC_message
-    else:                                      # module failed to power on
+    else:                                     # module failed to power on
       module.message = '%s is on RPC outlet %s' % (module.name,module.RPC_outlet)
       module.message += '\nRPC message:\n"%s"\n' % module.RPC_message
       module.message += '\nRPC message should contain: "%d)...Outlet %d  : On"' % (module.RPC_outlet,module.RPC_outlet)
 
   def off(self,module=None): # power off a RPC outlet
     self.write('OFF %d\r' % module.RPC_outlet) # power off RPC outlet for module
+    self.read()                                # clear output buffer
     self.write('Y\r')                          # confirm power off
     module.RPC_message = self.read()           # capture RPC message
     self.set_power_state(module=module)        # check powered off
@@ -766,7 +769,9 @@ class RPC(SerialModule,PowerModule):
 
   def off_all(self): # power off all RPC outlets without verification
     self.write('OFF\r') # power off all RPC outlets
+    self.read()         # clear output buffer
     self.write('Y\r')   # confirm power off
+    self.read()         # clear output buffer
 
   def set_power_state(self,module=None):
     if re.search(r'^.*Outlet\s+%d\s+:\s+On.*$' % module.RPC_outlet,module.RPC_message,re.M):
@@ -822,9 +827,9 @@ class Radiometer(SerialModule,PowerModule):
     self.write('AD\r')       # setup ASCII dump mode
 
   def set_conf_state(self):
-    self.write('ST\r')                      # check error status
-    self.conf_message = self.read()         # read message
-    if re.search(r'0',self.conf_message):   # if no errors
+    self.write('ST\r')                    # check error status
+    self.conf_message = self.read()       # read message
+    if re.search(r'0',self.conf_message): # if no errors
       self.conf_state = conf_state.initialized
       self.message = 'radiometer returned error status "0", no error'
     else:
@@ -1178,6 +1183,7 @@ class Control:
     log.report('initializing RPC module ... ')
     self.RPC = RPC()                                              # init RPC module
     self.RPC.off_all()                                            # power off all outlets
+    self.check_communication_state(module=self.RPC)               # check write state
     self.check_conf_state(conf_state.initialized,module=self.RPC) # check RPC init state
 
   def on_radiometer(self):
@@ -1513,7 +1519,7 @@ def main():
     print oserror
     control.auto_shutdown()              # shutdown gracefully
     sys.exit(1)                          # system error
-  except BaseException,exception:
+  except Exception,exception:
     log.inform('5kmlas_ctl encountered an error: %s.\n' % exception,color=log.RED)
     control.write_data()                 # try to save any data
     control.auto_shutdown()              # shutdown gracefully
