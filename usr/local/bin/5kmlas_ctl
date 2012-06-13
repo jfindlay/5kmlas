@@ -12,7 +12,6 @@
 # - mount root of USB system readonly
 # - ensure cron is started in USB system during bootup
 # - sync system clock with Middle Drum at the beginning of each run (or just first run of the night)
-# - make 65536 default SerialDevice buffer size and change buffer size to a kw argument
 
 # A module is a discrete, active component of the 5kmlas system.  It consists
 # of either a physical unit and a corresponding python class/object singleton or
@@ -247,8 +246,11 @@ class SerialModule(Serial):
   is set and then handled by the control module.
   '''
 
-  def __init__(self,buffer_size,*args,**kwargs):
-    self.buffer_size = buffer_size
+  def __init__(self,*args,**kwargs):
+    if 'buffer_size' in kwargs:
+      self.buffer_size = kwargs['buffer_size']
+    else:
+      self.buffer_size = 65536 # = 2**2**2**2 : termios read buffer size
     self.communication_state = communication_state.undefined
     try:
       super(SerialModule,self).__init__(*args,**kwargs)
@@ -544,11 +546,10 @@ class PTH(SerialModule):
   '''
 
   def __init__(self,*args,**kwargs):
-    self.buffer_size = 65536 # = 2**2**2**2 : termios read buffer size
     self.name = 'PTH board'  # PTH module name
     self.conf_message = ''   # state message
     self.message = ''        # result message
-    super(PTH,self).__init__(self.buffer_size,'/dev/ttyAM1',baudrate=9600,timeout=0.5,writeTimeout=0.5)
+    super(PTH,self).__init__('/dev/ttyAM1',baudrate=9600,timeout=0.5,writeTimeout=0.5)
     self.read()              # clear output buffer
     self.write('ECHO 0\r\n') # disable PTH-side serial echo
     self.read()              # clear output buffer
@@ -745,12 +746,11 @@ class RPC(SerialModule,PowerModule):
   '''
 
   def __init__(self):
-    self.buffer_size = 65536 # = 2**2**2**2 : termios read buffer size
     self.name = 'RPC module' # RPC module name
     self.conf_message = ''   # state message
     self.message = ''        # result message
     # TODO: specify additional serial parameters
-    super(RPC,self).__init__(self.buffer_size,'/dev/tts/2',baudrate=9600,timeout=1,writeTimeout=1)
+    super(RPC,self).__init__('/dev/tts/2',baudrate=9600,timeout=1,writeTimeout=1)
     self.set_conf_state()
 
   def __del__(self):
@@ -872,9 +872,8 @@ class Radiometer(SerialModule,PowerModule):
     '''
     hardware init
     '''
-    self.buffer_size = 65536 # = 2**2**2**2 : termios read buffer size
     # TODO: figure out how long read timeout needs to be to capture 5 m worth of radiometer data
-    super(Radiometer,self).__init__(self.buffer_size,'/dev/tts/3',baudrate=9600,timeout=1.5,writeTimeout=1.5)
+    super(Radiometer,self).__init__('/dev/tts/3',baudrate=9600,timeout=1.5,writeTimeout=1.5)
     self.write('TG 1\r') ; self.read() # internal trigger
     self.write('SS 0\r') ; self.read() # no single shot
     self.write('RA 2\r') ; self.read() # range 2: TODO: energy limits on this range?
