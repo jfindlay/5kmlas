@@ -873,7 +873,7 @@ class Radiometer(SerialModule,PowerModule):
     hardware init
     '''
     # TODO: figure out how long read timeout needs to be to capture 5 m worth of radiometer data
-    super(Radiometer,self).__init__('/dev/tts/3',baudrate=9600,timeout=1.5,writeTimeout=1.5)
+    super(Radiometer,self).__init__('/dev/tts/3',baudrate=9600,timeout=2,writeTimeout=0.5)
     self.write('TG 1\r') ; self.read() # internal trigger
     self.write('SS 0\r') ; self.read() # no single shot
     self.write('RA 2\r') ; self.read() # range 2: TODO: energy limits on this range?
@@ -1345,6 +1345,7 @@ class Operator(object):
       if re.search(r'5kmlas_ctl.*poll',cmd) :        instances['poll'] += 1
       elif re.search(r'5kmlas_ctl.*store',cmd) :     instances['store'] += 1
       elif re.search(r'5kmlas_ctl.*calibrate',cmd) : instances['run'] += 1
+      elif re.search(r'5kmlas_ctl.*darkbox',cmd) :   instances['run'] += 1
       elif re.search(r'5kmlas_ctl.*run',cmd) :       instances['run'] += 1
     return instances
 
@@ -1452,7 +1453,6 @@ class Runner(Operator):
 
     control.phase = phase.final
     control.off_shutter()              # close shutter
-    control.collect_start_stop_times() # record run stop time
     control.collect_radiometer_datum() # read radiometer data and append run times
     control.write_data()               # write data
     control.final_radiometer()         # final radiometer
@@ -1495,7 +1495,6 @@ class DarkBox(Runner):
     log.report('done collecting\n',color=log.GRAY)
 
     control.phase = phase.final
-    control.collect_start_stop_times() # record run stop time
     control.collect_radiometer_datum() # read radiometer data and append run times
     control.write_data()               # write data
     control.final_radiometer()         # final radiometer
@@ -1570,13 +1569,13 @@ def main():
   try: # catch any errors here and shutdown modules gracefully
     if args[0] == run_mode.poll or args[0] == run_mode.store:
       daemon = Daemon(args[0])           # daemon mode
-      daemon.run()
+      daemon.run(control)
     elif args[0] == run_mode.run:
       runner = Runner()                  # running mode
       runner.run(control,minutes=3)      # run for 3 minutes
     elif args[0] == run_mode.darkbox:
       darkbox = DarkBox()                # darkbox mode
-      darkbox.run(control,minutes=10)    # run for 10 minutes
+      darkbox.run(control,minutes=3)     # run for 3 minutes
     elif args[0] == run_mode.calibrate:
       calibrator = Runner()              # calibration mode
       calibrator.run(control,minutes=5)  # run for 5 minutes
