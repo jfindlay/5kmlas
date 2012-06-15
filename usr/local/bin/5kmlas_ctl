@@ -476,47 +476,47 @@ class Charger(ModbusModule):
         'kWh':0.1,
         'ratio':2.**-8.}
     data_dict = { # dict of tuples of measurements and associated units
-        'type':                  'charger',                                     # type of data structure
-        'timestamp':              datetime.datetime.now(UTC()),                 # [datetime object] Time stamp
-        'battery volts':         (registers[0x0008]*self.scale['V'],'V'),       # [V] (tau = 1 s) Voltage measured directly at the battery connection on the SunSaver MPPT.
-        'array volts':           (registers[0x0009]*self.scale['V'],'V'),       # [V] (tau = 1 s) Va is the terminal voltage of the solar input connection.
-        'load volts':            (registers[0x000A]*self.scale['V'],'V'),       # [V] (tau = 1 s) Vl is the terminal voltage of the load output connection.
-        'charging current':      (registers[0x000B]*self.scale['A'],'A'),       # [A] (tau = 1 s) Charging current to the battery as measured by on-board shunt.
-        'load current':          (registers[0x000C]*self.scale['A'],'A'),       # [A] (tau = 1 s) Load current to the systems loads as measured by on-board shunt.
-        'heatsink temp':         (registers[0x000D],'^oC'),                     # [^oC] Sunsaver MPPT Heatsink temperature.
-        'battery temp':          (registers[0x000E],'^oC'),                     # [^oC] Battery temperature as measured by the ambient temperature sensor or the optional RTS (if connected).
-        'ambient temp':          (registers[0x000F],'^oC'),                     # [^oC] Ambient temperature as measured by the ambient temperature sensor.
+        'type':                  'charger',                                   # type of data structure
+        'timestamp':              datetime.datetime.now(UTC()),               # [datetime object] Time stamp
+        'battery volts':         (registers[0x0008]*self.scale['V'],'V'),     # [V] (tau = 1 s) Voltage measured directly at the battery connection on the SunSaver MPPT.
+        'array volts':           (registers[0x0009]*self.scale['V'],'V'),     # [V] (tau = 1 s) Va is the terminal voltage of the solar input connection.
+        'load volts':            (registers[0x000A]*self.scale['V'],'V'),     # [V] (tau = 1 s) Vl is the terminal voltage of the load output connection.
+        'charging current':      (registers[0x000B]*self.scale['A'],'A'),     # [A] (tau = 1 s) Charging current to the battery as measured by on-board shunt.
+        'load current':          (registers[0x000C]*self.scale['A'],'A'),     # [A] (tau = 1 s) Load current to the systems loads as measured by on-board shunt.
+        'heatsink temp':         (registers[0x000D],'^oC'),                   # [^oC] Sunsaver MPPT Heatsink temperature.
+        'battery temp':          (registers[0x000E],'^oC'),                   # [^oC] Battery temperature as measured by the ambient temperature sensor or the optional RTS (if connected).
+        'ambient temp':          (registers[0x000F],'^oC'),                   # [^oC] Ambient temperature as measured by the ambient temperature sensor.
         # 0x0010, RTS is redundant
-        'charge state':          (registers[0x0011],'enum'),                    # [enum] Reports the charge state.
-        'array fault':           (registers[0x0012],'bitfield'),                # [bitfield] Reports faults identified by self diagnostics.
-        'slow battery volts':    (registers[0x0013]*self.scale['V'],'V'),       # [V] (tau = 25 s) Voltage measured directly at the battery connection on the SunSaver MPPT.
-        'battery ref':           (registers[0x0014]*self.scale['V ref'],'V'),   # [V] Target voltage to which the battery will be charged. This value is temperature compensated.
+        'charge state':          (registers[0x0011],'enum'),                  # [enum] Reports the charge state.
+        'array fault':           (registers[0x0012],'bitfield'),              # [bitfield] Reports faults identified by self diagnostics.
+        'slow battery volts':    (registers[0x0013]*self.scale['V'],'V'),     # [V] (tau = 25 s) Voltage measured directly at the battery connection on the SunSaver MPPT.
+        'battery ref':           (registers[0x0014]*self.scale['V ref'],'V'), # [V] Target voltage to which the battery will be charged. This value is temperature compensated.
         'Ah resetable charge':  ((registers[0x0015]<<16 | registers[0x0016])*self.scale['Ah'],'Ah'), # [A*h] Reports total solar amp-hours since last ah reset.
         'Ah total charge':      ((registers[0x0017]<<16 | registers[0x0018])*self.scale['Ah'],'Ah'), # [A*h] Reports total solar amp-hours since last ah reset.
-        'kWh charge':            (registers[0x0019]*self.scale['kWh'],'kWh'),   # [kW*h] Reports total solar kilowatt-hours since last ah/kWh reset.
-        'load state':            (registers[0x001A],'enum'),                    # [enum] Reports the charge state.
-        'load fault':            (registers[0x001B],'bitfield'),                # [bitfield] Reports faults identified by self diagnostics.
-        'low disconnect volts':  (registers[0x001C]*self.scale['V'],'V'),       # [V] Low voltage disconnect setpoint, current compensated.
+        'kWh charge':            (registers[0x0019]*self.scale['kWh'],'kWh'), # [kW*h] Reports total solar kilowatt-hours since last ah/kWh reset.
+        'load state':            (registers[0x001A],'enum'),                  # [enum] Reports the charge state.
+        'load fault':            (registers[0x001B],'bitfield'),              # [bitfield] Reports faults identified by self diagnostics.
+        'low disconnect volts':  (registers[0x001C]*self.scale['V'],'V'),     # [V] Low voltage disconnect setpoint, current compensated.
         'resetable load':       ((registers[0x001D]<<16 | registers[0x001E])*self.scale['Ah'],'Ah'), # [A*h] Reports total load amp-hours since last ah reset.
         'total load':           ((registers[0x001F]<<16 | registers[0x0020])*self.scale['Ah'],'Ah'), # [A*h] Reports total load amp-hours since last ah reset.
         'hour meter':            (registers[0x0021]<<16 | registers[0x0022],'h'), # [h] Reports total hours of operation since installed.
         'alarm':                 (registers[0x0023]<<16 | registers[0x0024],'bitfield'), # [bitfield] Reports alarms identified by self diagnostics. Each bit corresponds to a specific alarm.
-        'dip switch':            (registers[0x0025],'bitfield'),                # [bitfield] Each bit in the bit-field corresponds to an individual DIP switch setting.
-        'LED state':             (registers[0x0026],'enum'),                    # [enum] Reports the LED state.
-        'power out':             (registers[0x0027]*self.scale['W'],'W'),       # [W] Output power to the battery.
+        'dip switch':            (registers[0x0025],'bitfield'),              # [bitfield] Each bit in the bit-field corresponds to an individual DIP switch setting.
+        'LED state':             (registers[0x0026],'enum'),                  # [enum] Reports the LED state.
+        'power out':             (registers[0x0027]*self.scale['W'],'W'),     # [W] Output power to the battery.
         # sweep data is redundant, since the charger is regularly polled, but may be useful
-        'sweep Vmp':             (registers[0x0028]*self.scale['V'],'V'),       # [V] Maximum power voltage of the solar array found during last sweep.
-        'sweep Pmax':            (registers[0x0029]*self.scale['W'],'W'),       # [W] Maximum power output of the solar array found during last sweep.
-        'sweep Voc':             (registers[0x002A]*self.scale['V'],'V'),       # [V] Open circuit voltage of the solar array found during last sweep.
-        'daily Vb min':          (registers[0x002B]*self.scale['V'],'V'),       # [V] Minimum battery voltage measured today (value resets after dark).
-        'daily Vb max':          (registers[0x002C]*self.scale['V'],'V'),       # [V] Maximum battery voltage measured today (value resets after dark).
-        'daily Ah charge':       (registers[0x002D]*self.scale['Ah'],'Ah'),     # [A*h] Total charge amp-hours accumulated today (value resets after dark).
-        'daily Ah load':         (registers[0x002E]*self.scale['Ah'],'Ah'),     # [A*h] Total load amp-hours accumulated today (value resets after dark).
-        'daily array fault':     (registers[0x002F],'bitfield'),                # [bitfield] Reports array faults identified by self diagnostics that occurred today (value resets after dark).
-        'daily load fault':      (registers[0x0030],'bitfield'),                # [bitfield] Reports load faults identified by self diagnostics that occurred today (value resets after dark).
+        'sweep Vmp':             (registers[0x0028]*self.scale['V'],'V'),     # [V] Maximum power voltage of the solar array found during last sweep.
+        'sweep Pmax':            (registers[0x0029]*self.scale['W'],'W'),     # [W] Maximum power output of the solar array found during last sweep.
+        'sweep Voc':             (registers[0x002A]*self.scale['V'],'V'),     # [V] Open circuit voltage of the solar array found during last sweep.
+        'daily Vb min':          (registers[0x002B]*self.scale['V'],'V'),     # [V] Minimum battery voltage measured today (value resets after dark).
+        'daily Vb max':          (registers[0x002C]*self.scale['V'],'V'),     # [V] Maximum battery voltage measured today (value resets after dark).
+        'daily Ah charge':       (registers[0x002D]*self.scale['Ah'],'Ah'),   # [A*h] Total charge amp-hours accumulated today (value resets after dark).
+        'daily Ah load':         (registers[0x002E]*self.scale['Ah'],'Ah'),   # [A*h] Total load amp-hours accumulated today (value resets after dark).
+        'daily array fault':     (registers[0x002F],'bitfield'),              # [bitfield] Reports array faults identified by self diagnostics that occurred today (value resets after dark).
+        'daily load fault':      (registers[0x0030],'bitfield'),              # [bitfield] Reports load faults identified by self diagnostics that occurred today (value resets after dark).
         'daily alarm':           (registers[0x0031]<<16 | registers[0x0032],'bitfield'), # [bitfield] Reports alarms identified by self diagnostics that occurred today (value resets after dark).
-        'min Vb':                (registers[0x0033]*self.scale['V'],'V'),       # [V] Tracks the minimum battery voltage over time (value resets after dark).
-        'max Vb':                (registers[0x0034]*self.scale['V'],'V'),       # [V] Tracks the maximum battery voltage over time (value resets after dark).
+        'min Vb':                (registers[0x0033]*self.scale['V'],'V'),     # [V] Tracks the minimum battery voltage over time (value resets after dark).
+        'max Vb':                (registers[0x0034]*self.scale['V'],'V'),     # [V] Tracks the maximum battery voltage over time (value resets after dark).
         # There are further registers here, but they don't hold any data
         }
     return data_dict
@@ -640,25 +640,36 @@ class PTH(SerialModule):
     '''
     poll all PTH data
     '''
-    self.read() # clear output buffer
+    self.read()            # clear output buffer
     data_dict = {'type':'PTH','timestamp':datetime.datetime.now(UTC())}
     for name,unit in (('PRESS','Pa'),('TEMP','K'),('HUMID','%'),('RAIN','enum'),('SUPPLY','V')):
       self.write('%s\r\n' % name)
       message = self.read()
-      if not self.communication_state == communication_state.error:
-        measure = re.search(r'%s\s+(\S+)' % name,message).group(1)
-        data_dict[name] = (measure,unit)
+      search = re.search(r'%s\s+(\S+)' % name,message)
+      if search:
+        if unit != 'enum': # value is a float
+          measure = float(search.group(1))
+        else:              # value is a str
+          measure = search.group(1)
+      else:                # occasionally PTH does not respond
+        if unit != 'enum':
+          measure = 0
+        else:
+          measure = ''
+      data_dict[name] = (measure,unit)
     return data_dict
 
   def poll_rain(self,module=None):
     '''
     poll PTH rain monitor state
     '''
-    self.read() # clear output buffer
-    self.write('RAIN\r\n')
-    message = self.read() # read rain state
-    if not self.communication_state == communication_state.error:
-      trimmed_message = re.search(r'(RAIN\s+\S+)',message).group(1) # in open state, PTH repeats 'RAIN X' indefinitely
+    self.read()            # clear output buffer
+    self.write('RAIN\r\n') # request rain state
+    message = self.read()  # read rain state
+    search = re.search(r'(RAIN\s+\S+)',message)
+    if search:
+      # when RMON is enabled, PTH repeats 'RAIN {X|W}!' messages indefinitely
+      trimmed_message = search.group(1)
       module.PTH_message = trimmed_message
       rain_datum = re.split(r'\s+',module.PTH_message)
       self.set_rain_state(rain_datum[1],module=module)
@@ -681,7 +692,7 @@ class PTH(SerialModule):
     if state == 'X': # circuit open or no rain monitor
       module.rain_state = rain_state.open
       module.message = '%s circuit open or no %s present: "%s"' % (module.name,module.name,module.PTH_message)
-    else: # undefined
+    else:            # undefined
       module.rain_state = rain_state.undefined
       module.message = '%s state undefined: "%s"' % (module.name,module.name,module.PTH_message)
 
@@ -1416,7 +1427,7 @@ class Runner(Operator):
         log.inform('A `5kmlas_ctl store` process is running: waiting %d s for it to finish.\n' % wait_time)
         sleep(wait_time)
       elif instances['run'] > 1: # this is a run process
-        raise OSError('%d other `5kmlas_ctl run` process(es) running: only one instance of `5kmlas_ctl` should run at a time.\n' % instances['run'])
+        raise OSError('%d other `5kmlas_ctl run` process(es) running: only one instance of `5kmlas_ctl` should run at a time.' % instances['run'])
       else:
         break # this is the only `5kmlas_ctl` process running
 
