@@ -1,80 +1,40 @@
 #!/usr/bin/env python
 
 import os,sys,datetime,gzip
-from time import sleep
+from argparse import ArgumentParser
 from subprocess import Popen,PIPE
+from time import sleep
 from datetime import timedelta,tzinfo,time
-from pprint import pprint,saferepr,isreadable
+from pprint import isreadable
 
-class UTC(tzinfo):
-  def __init__(self) : super(UTC,self).__init__()
-  def __str__(self) : return 'UTC'
-  def __repr__(self) : return 'UTC()'
-  def tzname(self,dt) : return self.__str__()
-  def utcoffset(self,dt) : return timedelta(0)
-  def dst(self,dt) : return timedelta(0)
+# utils ########################################################################
 
-class Gnuplot:
-  def __init__(self):
-    self.term = 'wxt'
-    self.canvas_size = (900,500)
-    self.time_format = '%Y-%m-%dT%H:%M:%S'
-    self.axis_time_format = '%m-%d\\n%H:%M'
-    self.f_name = '/tmp/pygnuplot' # send data to gnuplot using this file
-    self.f = open(self.f_name,'w')
-    self.gp = Popen(('gnuplot',),stdout=PIPE,stdin=PIPE,close_fds=True)
-    self.stdin,self.stdout = self.gp.stdin,self.gp.stdout
-    self.stdin.write('set isosamples 128\n')
-    self.stdin.write('set key top left\n')
 
-  def __del__(self):
-    if not self.f.closed:
-      self.f.close()
-    if os.path.exists(self.f_name):
-      os.remove(self.f_name)
+# ISO-8601 datetime format
+ISO_8601 = '%Y-%m-%dT%H:%M:%S'
 
-  def set_term(self,t=None,x=None,y=None):
-    if t : term = t
-    else : term = self.term
-    if x : width = x
-    else : width = self.canvas_size[0]
-    if y : height = y
-    else : height = self.canvas_size[1]
-    self.stdin.write('set term %s size %d,%d\n' % (term,width,height))
+def nums(a):
+  return [i for i in xrange(len(a))]
 
-  def set_time_format(self,fmt=None):
-    if fmt : time_format = fmt
-    else : time_format = self.time_format
-    self.stdin.write('set timefmt "%s"\n' % time_format)
+def datums(d,measure,func='%f'):
+  return [float(func % float(i[measure][0])) for i in d]
 
-  def set(self,a=None):
-    self.stdin.write('set %s\n' % a)
+def dtdatums(d,measure,dtfmt=ISO_8601,func='%f'):
+  '''returns timestamp for each measurement'''
+  t_list,m_list = [],[]
+  for i in d:
+    t_list.append(i['timestamp'].strftime(dtfmt))
+    m_list.append(float(eval(func % float(i[measure][0]))))
+  return t_list,m_list
 
-  def write_file(self,*args):
-    self.f = open(self.f_name,'w')
-    for row in xrange(len(args[0])):
-      line = ''
-      for arg in args:
-        line += ' %s' % arg[row]
-      self.f.write('%s\n' % line.lstrip())
-    self.f.close()
+def timestamps(d,fmt=ISO_8601):
+  return [i['timestamp'].strftime(fmt) for i in d]
 
-  def plot(self,a=None):
-    self.stdin.write('plot %s\n' % a)
-    sleep(0.1) # gnuplot file writes are nonblocking
-
-  def plot_file(self,a=None,n=1):
-    cmd = 'plot %s\n' % a                   # gnuplot command
-    self.stdin.write(cmd % (self.f_name)*n) # insert self.f_name n times
-    sleep(0.1) # gnuplot file writes are nonblocking
-
-store_dir = '/var/www/5kmlas/data'
-
-def read_data():
+def read_data(path):
   d = {}
-  for f_name in sorted(os.listdir(store_dir)):
-    if os.path.isfile(os.path.join(store_dir,f_name)):
-      for line in gzip.open(os.path.join(store_dir,f_name),'r'):
+  for f_name in sorted(os.listdir(path)):
+    if os.path.isfile(os.path.join(path,f_name)):
+      for line in gzip.open(os.path.join(path,f_name),'r'):
         if isreadable(line):
           datum = eval(line)
           t = datum['type']
@@ -83,60 +43,152 @@ def read_data():
           d[t].append(datum)
   return d
 
-def nums(a):
-  return [i for i in xrange(len(a))]
+class UTC(tzinfo):
+  '''identity timezone'''
+  def __init__(self) : super(UTC,self).__init__()
+  def __str__(self) : return 'UTC'
+  def __repr__(self) : return 'UTC()'
+  def tzname(self,dt) : return self.__str__()
+  def utcoffset(self,dt) : return timedelta(0)
+  def dst(self,dt) : return timedelta(0)
 
-def datums(d,measure,func='%f'):
-  return [float(func % float(i[measure][0])) for i in d]
+# gnuplot ######################################################################
 
-def timestamps(d,fmt):
-  return [i['timestamp'].strftime(fmt) for i in d]
+class Gnuplot:
+  def __init__(self):
+    self.term = 'wxt'
+    self.canvas_size = (900,500)
+    self.time_format = ISO_8601
+    self.axis_time_format = '%m-%d\\n%H:%M'
+    self.files = {}  # dictionary of files used to store data for plots
+    self.f_sep = '|' # data file field separator
+    self.history = open('/tmp/gp_history','w')
+    self.gp = Popen(('gnuplot',),stdout=PIPE,stdin=PIPE,close_fds=True)
+    self.stdin,self.stdout = self.gp.stdin,self.gp.stdout
+    self.write('set isosamples 128\n')
+    self.write('set key top left\n')
+    self.set_datafile_separator()
+    self.set_term()
+
+  def __del__(self):
+    self.gp.stdin.close()
+    self.gp.stdout.close()
+    self.history.close()
+    for f_name in self.files.keys():
+      if not self.files[f_name].closed:
+        self.files[f_name].close()
+#      if os.path.exists(f_name):
+#        os.remove(f_name)
+
+  def write(self,a):
+    self.history.write(a)
+    self.stdin.write(a)
+
+  def set_datafile_separator(self,f_sep=None):
+    if f_sep : s = f_sep
+    else : s = self.f_sep
+    self.set('datafile separator "%s"' % s)
+
+  def set_term(self,term=None,width=None,height=None):
+    if term : t = term
+    else : t = self.term
+    if width : x = width
+    else : x = self.canvas_size[0]
+    if height : y = height
+    else : y = self.canvas_size[1]
+    self.set('term %s size %d,%d' % (t,x,y))
+
+  def set_time_format(self,fmt=None):
+    if fmt : f = fmt
+    else : f = self.time_format
+    self.set('timefmt "%s"' % f)
+
+  def set(self,a=None):
+    if a:
+      self.write('set %s\n' % a)
+
+  def write_file(self,f_name,*args):
+    '''
+    Write data to temp file used to construct gnuplot plots.  All args supplied
+    must be 1D iterables of the same size.
+    '''
+    self.files[f_name] = open(f_name,'w')
+    for row in xrange(len(args[0])):
+      line = ''
+      for arg in args:
+        if not isinstance(arg[row],str):
+          m = '%f' % arg[row]
+        else:
+          m = arg[row]
+        if len(line):
+          line += self.f_sep
+        line += m
+      self.files[f_name].write('%s\n' % line)
+    self.files[f_name].close()
+
+  def plot(self,a=None):
+    self.write('plot %s\n' % a)
+    sleep(0.1) # gnuplot file writes are nonblocking
+
+# plots ########################################################################
+
+def volts(g,data,path):
+  '''PTH SUPPLY, slow batt volts, array volts'''
+  g.set('output "%s"' % os.path.join(path,'plots/volts.png'))
+  g.write_file('/tmp/1',*dtdatums(data['PTH'],'SUPPLY'))
+  g.write_file('/tmp/2',*dtdatums(data['charger'],'slow battery volts'))
+  g.write_file('/tmp/3',*dtdatums(data['charger'],'array volts'))
+  g.set('xlabel "UTC"')
+  g.set('ylabel "electric potential [V]"')
+  g.plot('"/tmp/1" using 1:2 with dots t "PTH SUPPLY volts", "/tmp/2" using 1:2 with dots t "slow batt volts", "/tmp/3" using 1:2 with dots t "solar array volts"')
+
+def currents(g,data,path):
+  '''charger load current, charging current'''
+  g.set('output "%s"' % os.path.join(path,'plots/currents.png'))
+  g.write_file('/tmp/1',*dtdatums(data['charger'],'load current'))
+  g.write_file('/tmp/2',*dtdatums(data['charger'],'charging current'))
+  g.set('xlabel "UTC"')
+  g.set('ylabel "electric current [I]"')
+  g.plot('"/tmp/1" using 1:2 with dots t "load current", "/tmp/2" using 1:2 with dots t "charging current"')
+
+def charge(g,data,path):
+  '''battery charge'''
+  g.set('output "%s"' % os.path.join(path,'plots/charge.png'))
+  g.write_file('/tmp/1',*dtdatums(data['charger'],'Ah total charge'))
+  g.set('xlabel "UTC"')
+  g.set('ylabel "electric energy [A*h]"')
+  g.plot('"/tmp/1" using 1:2 with dots t "battery charge"')
+
+def temps(g,data,path):
+  '''charger ambient, heatsink temp, PTH temp'''
+  g.set('output "%s"' % os.path.join(path,'plots/temps.png'))
+  g.write_file('/tmp/1',*dtdatums(data['charger'],'heatsink temp',func='%f + 273.15'))
+  g.write_file('/tmp/2',*dtdatums(data['charger'],'ambient temp',func='%f + 273.15'))
+  g.write_file('/tmp/3',*dtdatums(data['PTH'],'TEMP'))
+  g.set('xlabel "UTC"')
+  g.set('ylabel "temperature [K]"')
+  g.plot('"/tmp/1" using 1:2 with line t "heatsink temp", "/tmp/2" using 1:2 with line t "ambient temp", "/tmp/3" using 1:2 with line t "PTH TEMP"')
+
+# main #########################################################################
+
+def parse_args():
+  parser = ArgumentParser(description='Analyze 5kmlas data.')
+  parser.add_argument('path',type=str,default='data',nargs='*',help='path to data location')
+  return parser.parse_args()
 
 def main():
-  full_data = read_data()
+  args = parse_args()
+  data = read_data(os.path.join(args.path,'store'))
   g = Gnuplot()
   g.set_term('png')
   g.set('grid')
   g.set_time_format()
   g.set('xdata time')
   g.set('format x "%s"' % g.axis_time_format)
-  # PTH SUPPLY, slow batt volts, array volts
-  g.set('output "/var/www/5kmlas/plots/volts.png"')
-  x = timestamps(full_data['PTH'],g.time_format)
-  y_1 = datums(full_data['PTH'],'SUPPLY')
-  y_2 = datums(full_data['charger'],'slow battery volts')
-  y_3 = datums(full_data['charger'],'array volts')
-  g.write_file(x,y_1,y_2,y_3)
-  g.set('xlabel "UTC"')
-  g.set('ylabel "electric potential [V]"')
-  g.plot_file('"%s" using 1:2 with line t "PTH SUPPLY volts", "%s" using 1:3 with line t "slow batt volts", "%s" using 1:4 with line t "solar array volts"',3)
-  # charger load current, charging current
-  g.set('output "/var/www/5kmlas/plots/currents.png"')
-  x = timestamps(full_data['charger'],g.time_format)
-  y_1 = datums(full_data['charger'],'load current')
-  y_2 = datums(full_data['charger'],'charging current')
-  g.write_file(x,y_1,y_2)
-  g.set('xlabel "UTC"')
-  g.set('ylabel "electric current [I]"')
-  g.plot_file('"%s" using 1:2 with line t "load current", "%s" using 1:3 with line t "charging current"',2)
-  # battery charge
-  g.set('output "/var/www/5kmlas/plots/charge.png"')
-  x = timestamps(full_data['charger'],g.time_format)
-  y_1 = datums(full_data['charger'],'Ah total charge')
-  g.write_file(x,y_1)
-  g.set('xlabel "UTC"')
-  g.set('ylabel "electric energy [A*h]"')
-  g.plot_file('"%s" using 1:2 with line t "battery charge"',1)
-  # charger ambient, heatsink temp, PTH temp
-  g.set('output "/var/www/5kmlas/plots/temps.png"')
-  x = timestamps(full_data['charger'],g.time_format)
-  y_1 = datums(full_data['charger'],'heatsink temp','%f + 273.15')
-  y_2 = datums(full_data['charger'],'ambient temp','%f + 273.15')
-  y_3 = datums(full_data['PTH'],'TEMP')
-  g.write_file(x,y_1,y_2,y_3)
-  g.set('xlabel "UTC"')
-  g.set('ylabel "temperature [K]"')
-  g.plot_file('"%s" using 1:2 with line t "heatsink temp", "%s" using 1:3 with line t "ambient temp", "%s" using 1:4 with line t "PTH TEMP"',3)
+  volts(g,data,args.path)
+  currents(g,data,args.path)
+  charge(g,data,args.path)
+  temps(g,data,args.path)
 
 if __name__ == '__main__':
   try:

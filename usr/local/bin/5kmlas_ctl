@@ -10,33 +10,34 @@
 # - create unprivileged user to run 5kmlas_ctl runner/calibrator
 # - mount rootfs on SBC readonly in chrooted or pivot_rooted USB system
 # - mount root of USB system readonly
-# - ensure cron is started in USB system during bootup
 # - sync system clock with Middle Drum at the beginning of each run (or just first run of the night)
 
-# A module is a discrete, active component of the 5kmlas system.  It consists
-# of either a physical unit and a corresponding python class/object singleton or
-# just the python class/object.
-#
-# list of modules in the hierarchy of program control:
-# - control: logical module.  Functions like a control panel.  All other
-#   modules connect with the control module in unified manner.  Provides
-#   failsafe auto shutdown functionality
-#   * data: logical module.  Stores data in memory, writes it to /tmp/data and
-#     then /mnt/data
-#   * charger: regulates electrical energy supply and use among the solar
-#     array, battery array, and other modules.
-#   * PTH: measures environmental state, controls the power states of other modules
-#     - rain: measures rain state: dry,wet,open/none
-#     - heater: heats laser exit window
-#     - inverter: converts battery DC supply current to AC
-#   * RPC: controls power states of AC modules
-#     - radiometer: measures laser intensity
-#     - shutter: opens and closes laser exit port
-#     - laser: source of Middle Drum calibration radiation
-# modules which are always powered on, or in constant use:
-#   SBC, PTH, radio, antenna, charger, batteries, solar array
-# modules powered on by SBC controlling program:
-#   rain sensor, heater, inverter, RPC, radiometer, shutter, laser
+'''
+  A module is a discrete, active component of the 5kmlas system.  It consists
+  of either a physical unit and a corresponding python class/object singleton or
+  just the python class/object.
+  
+  list of modules in the hierarchy of program control:
+  - control: logical module.  Functions like a control panel.  All other
+    modules connect with the control module in unified manner.  Provides
+    failsafe auto shutdown functionality
+    * data: logical module.  Stores data in memory, writes it to /tmp/data and
+      then /mnt/data
+    * charger: regulates electrical energy supply and use among the solar
+      array, battery array, and other modules.
+    * PTH: measures environmental state, controls the power states of other modules
+      - rain: measures rain state: dry,wet,open/none
+      - heater: heats laser exit window
+      - inverter: converts battery DC supply current to AC
+    * RPC: controls power states of AC modules
+      - radiometer: measures laser intensity
+      - shutter: opens and closes laser exit port
+      - laser: source of Middle Drum calibration radiation
+  modules which are always powered on, or in constant use:
+    SBC, PTH, radio, antenna, charger, batteries, solar array
+  modules powered on by SBC controlling program:
+    rain sensor, heater, inverter, RPC, radiometer, shutter, laser
+'''
 
 import os,sys,re,gzip,datetime # datetime.datetime object can't be imported
                                # directly because datetime's __repr__
@@ -55,11 +56,11 @@ from pymodbus.exceptions import ModbusException
 # data #########################################################################
 
 class Enum:
-  # this idiom is from http://norvig.com/python-iaq.html.  It might be better
-  # to use collections.namedtuple, but this datatype wasn't added to python
-  # until 2.6 and I would have to upgrade debian to squeeze, which uses the new
-  # ARM ABI
   '''
+  this idiom is from http://norvig.com/python-iaq.html.  It might be better to
+  use collections.namedtuple, but this datatype wasn't added to python until
+  2.6 and I would have to upgrade debian to squeeze, which uses the new ARM ABI
+
   Create an enumerated type, then add var/value pairs to it.
   The constructor and the method .ints(names) take a list of variable names,
   and assign them consecutive integers as values.  The method .strs(names)
