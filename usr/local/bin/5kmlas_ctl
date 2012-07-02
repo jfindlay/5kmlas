@@ -11,6 +11,7 @@
 # - mount rootfs on SBC readonly in chrooted or pivot_rooted USB system
 # - mount root of USB system readonly
 # - sync system clock with Middle Drum at the beginning of each run (or just first run of the night)
+# - format storage file names and directories to be like MD data style
 
 '''
   A module is a discrete, active component of the 5kmlas system.  It consists

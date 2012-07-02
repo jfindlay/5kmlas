@@ -9,7 +9,6 @@ from pprint import isreadable
 
 # utils ########################################################################
 
-
 # ISO-8601 datetime format
 ISO_8601 = '%Y-%m-%dT%H:%M:%S'
 
@@ -30,11 +29,11 @@ def dtdatums(d,measure,dtfmt=ISO_8601,func='%f'):
 def timestamps(d,fmt=ISO_8601):
   return [i['timestamp'].strftime(fmt) for i in d]
 
-def read_data(path):
+def read_data(data_path):
   d = {}
-  for f_name in sorted(os.listdir(path)):
-    if os.path.isfile(os.path.join(path,f_name)):
-      for line in gzip.open(os.path.join(path,f_name),'r'):
+  for f_name in sorted(os.listdir(data_path)):
+    if os.path.isfile(os.path.join(data_path,f_name)):
+      for line in gzip.open(os.path.join(data_path,f_name),'r'):
         if isreadable(line):
           datum = eval(line)
           t = datum['type']
@@ -132,9 +131,9 @@ class Gnuplot:
 
 # plots ########################################################################
 
-def volts(g,data,path):
+def volts(g,data,plot_path):
   '''PTH SUPPLY, slow batt volts, array volts'''
-  g.set('output "%s"' % os.path.join(path,'plots/volts.png'))
+  g.set('output "%s"' % os.path.join(plot_path,'volts.png'))
   g.write_file('/tmp/1',*dtdatums(data['PTH'],'SUPPLY'))
   g.write_file('/tmp/2',*dtdatums(data['charger'],'slow battery volts'))
   g.write_file('/tmp/3',*dtdatums(data['charger'],'array volts'))
@@ -142,26 +141,26 @@ def volts(g,data,path):
   g.set('ylabel "electric potential [V]"')
   g.plot('"/tmp/1" using 1:2 with dots t "PTH SUPPLY volts", "/tmp/2" using 1:2 with dots t "slow batt volts", "/tmp/3" using 1:2 with dots t "solar array volts"')
 
-def currents(g,data,path):
+def currents(g,data,plot_path):
   '''charger load current, charging current'''
-  g.set('output "%s"' % os.path.join(path,'plots/currents.png'))
+  g.set('output "%s"' % os.path.join(plot_path,'currents.png'))
   g.write_file('/tmp/1',*dtdatums(data['charger'],'load current'))
   g.write_file('/tmp/2',*dtdatums(data['charger'],'charging current'))
   g.set('xlabel "UTC"')
   g.set('ylabel "electric current [I]"')
   g.plot('"/tmp/1" using 1:2 with dots t "load current", "/tmp/2" using 1:2 with dots t "charging current"')
 
-def charge(g,data,path):
+def charge(g,data,plot_path):
   '''battery charge'''
-  g.set('output "%s"' % os.path.join(path,'plots/charge.png'))
+  g.set('output "%s"' % os.path.join(plot_path,'charge.png'))
   g.write_file('/tmp/1',*dtdatums(data['charger'],'Ah total charge'))
   g.set('xlabel "UTC"')
   g.set('ylabel "electric energy [A*h]"')
   g.plot('"/tmp/1" using 1:2 with dots t "battery charge"')
 
-def temps(g,data,path):
+def temps(g,data,plot_path):
   '''charger ambient, heatsink temp, PTH temp'''
-  g.set('output "%s"' % os.path.join(path,'plots/temps.png'))
+  g.set('output "%s"' % os.path.join(plot_path,'temps.png'))
   g.write_file('/tmp/1',*dtdatums(data['charger'],'heatsink temp',func='%f + 273.15'))
   g.write_file('/tmp/2',*dtdatums(data['charger'],'ambient temp',func='%f + 273.15'))
   g.write_file('/tmp/3',*dtdatums(data['PTH'],'TEMP'))
@@ -173,22 +172,23 @@ def temps(g,data,path):
 
 def parse_args():
   parser = ArgumentParser(description='Analyze 5kmlas data.')
-  parser.add_argument('path',type=str,default='data',nargs='*',help='path to data location')
+  parser.add_argument('data_path',type=str,default='data/store',nargs='*',help='path to data location')
+  parser.add_argument('plot_path',type=str,default='data/plots',nargs='*',help='path to plot location')
   return parser.parse_args()
 
 def main():
   args = parse_args()
-  data = read_data(os.path.join(args.path,'store'))
+  data = read_data(args.data_path)
   g = Gnuplot()
   g.set_term('png')
   g.set('grid')
   g.set_time_format()
   g.set('xdata time')
   g.set('format x "%s"' % g.axis_time_format)
-  volts(g,data,args.path)
-  currents(g,data,args.path)
-  charge(g,data,args.path)
-  temps(g,data,args.path)
+  volts(g,data,args.plot_path)
+  currents(g,data,args.plot_path)
+  charge(g,data,args.plot_path)
+  temps(g,data,args.plot_path)
 
 if __name__ == '__main__':
   try:
