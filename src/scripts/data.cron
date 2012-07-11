@@ -1,10 +1,24 @@
 #!/usr/bin/env python
 
-import os,sys
+import os,sys,gzip,datetime
+from datetime import tzinfo,timedelta
 from subprocess import call
+from pprint import isreadable
+
+ISO_8601 = '%Y-%m-%dT%H:%M:%S'
+data_path = '/var/www/5kmlas/data'
+
+class UTC(tzinfo):
+  '''identity timezone'''
+  def __init__(self) : super(UTC,self).__init__()
+  def __str__(self) : return 'UTC'
+  def __repr__(self) : return 'UTC()'
+  def tzname(self,dt) : return self.__str__()
+  def utcoffset(self,dt) : return timedelta(0)
+  def dst(self,dt) : return timedelta(0)
 
 def read_write_data(data_path):
-  flat_file = open(os.path.join(data_path,'flat_file'))
+  flat_files = {}
   for f_name in sorted(os.listdir(data_path)):
     path = os.path.join(data_path,f_name)
     if os.path.isfile(path):
@@ -12,11 +26,28 @@ def read_write_data(data_path):
         if isreadable(line):
           datum = eval(line)
           t = datum['type']
-          print datum ; raw_input()
+          if not t in flat_files.keys():
+            flat_files[t] = open_file(t,os.path.join(data_path,'flat_files'))
+          sorted_dkeys = sorted(datum.keys())
+          line = ''
+          for key in sorted_dkeys:
+            if key == 'timestamp':
+              line += ' %s' % datum[key].strftime(ISO_8601)
+            elif key == 'type':
+              continue
+            elif datum[key][1] == 'enum' or datum[key][1] == 'bitfield':
+              continue
+            else:
+              line += ' %s' % datum[key][0]
+          flat_files[t].write('%s\n' % line.strip())
+
+def open_file(t,path):
+  if not os.path.exists(path):
+    os.makedirs(path)
+  return gzip.open(os.path.join(path,'%s.gz' % t),'w')
 
 def main():
-  data_path = '/var/www/5kmlas/data'
-  call('rsync -aq --rsh="ssh -p 4444" 155.101.101.45:/tmp/store %s' % data_path,shell=True)
+  call('rsync -av --rsh="ssh -p 4444" 155.101.101.45:/tmp/store/* %s' % data_path,shell=True)
   read_write_data(data_path)
 
 if __name__ == '__main__':
