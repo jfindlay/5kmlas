@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import os,sys,datetime,gzip
+from math import fsum
 from argparse import ArgumentParser
 from subprocess import Popen,PIPE
 from time import sleep
@@ -26,12 +27,23 @@ def dtdatums(d,measure,dtfmt=ISO_8601,func='%f'):
     m_list.append(float(eval(func % float(i[measure][0]))))
   return t_list,m_list
 
+def dtenergies(d,dtfmt=ISO_8601):
+  '''returns timestamp for each energy list'''
+  t_list,m_list = [],[]
+  for i in d:
+    t_list.append(i['timestamp'].strftime(dtfmt))
+    m_list.append(i['energies'][0])
+  return t_list,m_list
+
 def timestamps(d,fmt=ISO_8601):
   return [i['timestamp'].strftime(fmt) for i in d]
 
 def read_data(data_path):
   d = {}
+  i = 0
   for f_name in sorted(os.listdir(data_path)):
+    print f_name
+    i += 1
     if os.path.isfile(os.path.join(data_path,f_name)):
       for line in gzip.open(os.path.join(data_path,f_name),'r'):
         if isreadable(line):
@@ -40,6 +52,7 @@ def read_data(data_path):
           if t not in d.keys():
             d[t] = []
           d[t].append(datum)
+    #if i == 5 : break
   return d
 
 class UTC(tzinfo):
@@ -56,7 +69,7 @@ class UTC(tzinfo):
 class Gnuplot:
   def __init__(self):
     self.term = 'wxt'
-    self.canvas_size = (900,500)
+    self.canvas_size = (1024,600)
     self.time_format = ISO_8601
     self.axis_time_format = '%m-%d\\n%H:%M'
     self.files = {}  # dictionary of files used to store data for plots
@@ -76,8 +89,8 @@ class Gnuplot:
     for f_name in self.files.keys():
       if not self.files[f_name].closed:
         self.files[f_name].close()
-#      if os.path.exists(f_name):
-#        os.remove(f_name)
+      if os.path.exists(f_name):
+        os.remove(f_name)
 
   def write(self,a):
     self.history.write(a)
@@ -166,7 +179,27 @@ def temps(g,data,plot_path):
   g.write_file('/tmp/3',*dtdatums(data['PTH'],'TEMP'))
   g.set('xlabel "UTC"')
   g.set('ylabel "temperature [K]"')
-  g.plot('"/tmp/1" using 1:2 with line t "heatsink temp", "/tmp/2" using 1:2 with line t "ambient temp", "/tmp/3" using 1:2 with line t "PTH TEMP"')
+  g.plot('"/tmp/1" using 1:2 with dots t "heatsink temp", "/tmp/2" using 1:2 with dots t "ambient temp", "/tmp/3" using 1:2 with dots t "PTH TEMP"')
+
+def energies(g,data,plot_path):
+  '''radiometer energy'''
+  g.set('output "%s"' % os.path.join(plot_path,'energies.png'))
+  g.set('samples 512')
+  g.set('isosamples 512')
+  (timestamps,energy_lists) = dtenergies(data['radiometer'])
+  average_energies = []
+  for energy_list in energy_lists:
+    if len(energy_list):
+      for energy in energy_list:
+        if energy >= 1:
+          del energy_list[energy_list.index(energy)]
+      average_energies.append(fsum(energy_list)/len(energy_list))
+    else:
+      average_energies.append(0)
+  g.write_file('/tmp/1',timestamps,average_energies)
+  g.set('xlabel "UTC"')
+  g.set('ylabel "energy [J]"')
+  g.plot('"/tmp/1" using 1:2 with dots t "energies"')
 
 # main #########################################################################
 
@@ -189,6 +222,7 @@ def main():
   currents(g,data,args.plot_path)
   charge(g,data,args.plot_path)
   temps(g,data,args.plot_path)
+  energies(g,data,args.plot_path)
 
 if __name__ == '__main__':
   try:
