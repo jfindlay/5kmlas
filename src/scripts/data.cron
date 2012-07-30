@@ -47,7 +47,7 @@ def open_file(t,path):
   return gzip.open(os.path.join(path,'%s.gz' % t),'w')
 
 def main():
-  call('rsync -av --rsh="ssh -p 4444" 155.101.101.45:/tmp/store/* %s' % data_path,shell=True)
+  call('rsync -aq --rsh="ssh -p 4444" 155.101.101.45:/tmp/store/* %s' % data_path,shell=True)
   read_write_data(data_path)
 
 if __name__ == '__main__':

@@ -52,7 +52,7 @@ def read_data(data_path):
           if t not in d.keys():
             d[t] = []
           d[t].append(datum)
-    #if i == 5 : break
+    if i == 7 : break
   return d
 
 class UTC(tzinfo):
@@ -77,6 +77,7 @@ class Gnuplot:
     self.history = open('/tmp/gp_history','w')
     self.gp = Popen(('gnuplot',),stdout=PIPE,stdin=PIPE,close_fds=True)
     self.stdin,self.stdout = self.gp.stdin,self.gp.stdout
+    self.write('set samples 128\n')
     self.write('set isosamples 128\n')
     self.write('set key top left\n')
     self.set_datafile_separator()
@@ -89,8 +90,8 @@ class Gnuplot:
     for f_name in self.files.keys():
       if not self.files[f_name].closed:
         self.files[f_name].close()
-      if os.path.exists(f_name):
-        os.remove(f_name)
+      #if os.path.exists(f_name):
+#        os.remove(f_name)
 
   def write(self,a):
     self.history.write(a)
@@ -184,8 +185,6 @@ def temps(g,data,plot_path):
 def energies(g,data,plot_path):
   '''radiometer energy'''
   g.set('output "%s"' % os.path.join(plot_path,'energies.png'))
-  g.set('samples 512')
-  g.set('isosamples 512')
   (timestamps,energy_lists) = dtenergies(data['radiometer'])
   average_energies = []
   for energy_list in energy_lists:
@@ -200,6 +199,36 @@ def energies(g,data,plot_path):
   g.set('xlabel "UTC"')
   g.set('ylabel "energy [J]"')
   g.plot('"/tmp/1" using 1:2 with dots t "energies"')
+
+def temp_energy(g,data,plot_path):
+  '''PTH TEMP vs radiometery energy'''
+  g.set('output "%s"' % os.path.join(plot_path,'temp_energy.png'))
+  etimestamps,energy_lists = dtenergies(data['radiometer'])
+  average_energies = []
+  for energy_list in energy_lists:
+    if len(energy_list):
+      for energy in energy_list:
+        if energy >= 1:
+          del energy_list[energy_list.index(energy)]
+      average_energies.append(fsum(energy_list)/len(energy_list))
+    else:
+      average_energies.append(0)
+  energy_tuple = etimestamps,average_energies
+  temp_tuple = dtdatums(data['PTH'],'TEMP')
+  temps,energies = [],[]
+  temp_start = 1
+  for i in xrange(len(energy_tuple[0])):
+    for j in xrange(temp_start,len(temp_tuple[0])): # there are many more temp measurements than energy measurements
+      print temp_tuple[j][1],energy_tuple[i][1] ; raw_input()
+      if temp_tuple[j][1] <= energy_tuple[i][1] and temp_tuple[j + 1][1] >= energy_tuple[i][1]:
+        temps.append((temp_tuple[j][0] + temp_tuple[j + 1][0])/2.)
+        energies.append(energy_tuple[i][0])
+        temp_start = j
+        break
+  g.write_file('/tmp/1',temps,energies)
+  g.set('xlabel "temperature [K]"')
+  g.set('ylabel "energy [J]"')
+  g.plot('"/tmp/1" using 1:2 with dots t "average energy vs temperature"')
 
 # main #########################################################################
 
@@ -218,11 +247,12 @@ def main():
   g.set_time_format()
   g.set('xdata time')
   g.set('format x "%s"' % g.axis_time_format)
-  volts(g,data,args.plot_path)
-  currents(g,data,args.plot_path)
-  charge(g,data,args.plot_path)
-  temps(g,data,args.plot_path)
-  energies(g,data,args.plot_path)
+  #volts(g,data,args.plot_path)
+  #currents(g,data,args.plot_path)
+  #charge(g,data,args.plot_path)
+  #temps(g,data,args.plot_path)
+  #energies(g,data,args.plot_path)
+  temp_energy(g,data,args.plot_path)
 
 if __name__ == '__main__':
   try:
